@@ -1,23 +1,22 @@
 /**
- * nerisma-input — Extension PI TUI
+ * pi-input-revamp — pi TUI extension
  *
- * Remplace l'éditeur (barre d'input) de pi par un cadre arrondi complet
- * avec caractère de prompt π et espacement parfaitement maîtrisé.
+ * Replaces pi's input editor (the prompt bar) with a full rounded frame, a π
+ * prompt character, and tightly controlled spacing.
  *
  * ┌─ agent · anthropic/claude-sonnet-4-5 · high ──── 0.015$ · 15.2K (2.1K|8.3K) · 12.3% ─╮
  * │ π hello world                                                                          │
  * ╰────────────────────────────────────────────────────────────────────────────────────────╯
  *
- * La bordure utilise la couleur accent du thème actif.
- * Le π est coloré avec accent, espacé d'1 caractère de la bordure et d'1 du texte.
- * Compatible avec tool-border-global (agit sur les tools, pas l'éditeur).
+ * The border uses the active theme's accent color.
+ * The π is colored with accent, one column away from the border and one from the text.
  *
  * ── Technique ──
  *
- * Contrairement à la plupart des extensions éditeur qui appellent super.render()
- * et post-traitent le résultat, celle-ci construit le rendu from scratch en
- * utilisant this.layoutText() pour le word-wrapping. Ça permet un contrôle
- * total sur l'espacement et évite les interférences du paddingX interne.
+ * Unlike most editor extensions that call super.render() and post-process the
+ * result, this one builds the render from scratch using this.layoutText() for
+ * word-wrapping. That gives full control over spacing and avoids interference
+ * from the internal paddingX.
  */
 
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -25,106 +24,114 @@ import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
 
-// ── Outils effectivement actifs ──────────────────────────
+// ── Tools actually sent on the wire ───────────────────────
 
 /**
- * Noms des outils réellement transmis au provider.
+ * Tools array captured (by reference) from the last provider request payload.
  *
- * Version autonome (package publié) : on retourne l'ensemble actif tel quel.
- * Dans le setup multi-agents d'origine, ce calcul était affiné par l'allow-list
- * du frontmatter de l'agent actif (via `../agents/effective-tools.js`) ; ici on
- * reste générique pour ne dépendre d'aucun sous-système externe.
+ * Held by reference, not snapshotted: it is read lazily at render time, after
+ * the whole `before_provider_request` hook chain has run. Other extensions may
+ * filter this array in place (e.g. removing MCP-bridged tools that pollute the
+ * active set but never reach the wire), so reading it late reports exactly what
+ * was sent — regardless of extension load order.
  */
-function effectiveToolNames(
-  pi: ExtensionAPI,
-  _cwd: string,
-  _agentName: string | null | undefined,
-): string[] {
+let lastWirePayloadTools: unknown[] | null = null;
+
+/**
+ * Finds the `tools` array inside a provider request payload (shape is
+ * `unknown` and provider-specific). Tries the common locations.
+ */
+function findToolsArray(payload: unknown): unknown[] | null {
+  if (!payload || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  const nested = (k: string) => (p[k] as Record<string, unknown> | undefined)?.tools;
+  for (const c of [p.tools, nested("body"), nested("request"), nested("params")]) {
+    if (Array.isArray(c)) return c;
+  }
+  return null;
+}
+
+/** Name of a tool entry, whatever the wire format (OpenAI / Anthropic / pi). */
+function toolName(t: unknown): string | undefined {
+  if (!t || typeof t !== "object") return undefined;
+  const o = t as { name?: string; function?: { name?: string } };
+  return o.name ?? o.function?.name;
+}
+
+/**
+ * Names of the tools actually sent to the provider on the last request.
+ *
+ * Prefers the wire truth read from the captured payload; falls back to the
+ * active set before the first request (or if no tools array is found).
+ */
+function effectiveToolNames(pi: ExtensionAPI): string[] {
+  if (lastWirePayloadTools) {
+    const names = lastWirePayloadTools
+      .map(toolName)
+      .filter((n): n is string => n !== undefined);
+    if (names.length > 0) return names;
+  }
   return pi.getActiveTools();
 }
 
-// ── Helpers de formatage ─────────────────────────────────
+// ── Formatting helpers ────────────────────────────────────
 
-/** Formate un nombre de tokens (1200 → "1.2K", 1_500_000 → "1.5M") */
+/** Formats a token count (1200 → "1.2K", 1_500_000 → "1.5M"). */
 function formatTokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(2)}M`;
   if (count >= 1_000) return `${(count / 1_000).toFixed(2)}K`;
   return `${count}`;
 }
 
-// ── Animation « petit symbole qui pulse » ──────────────
+// ── "equalizer" animation (VU-meter-style bars ▁▂▃…█) ──────
 
-// ── Choix du style d'animation ─────────────────────────
-// Change cette constante puis /reload dans pi pour essayer en live.
-//
-// ✅ = rend bien en Consolas (Block Elements / ASCII / ●○·•)
-// ⚠ = nécessite les glyphes Braille (U+2800), ABSENTS de Consolas → tofu
-type AnimStyle =
-  // ── Consolas-safe ──
-  | "quadrant"          // ✅ point en coin qui orbite, vrai spinner (▖▘▝▗)
-  | "half-block"        // ✅ demi-bloc qui tourne sur 4 côtés (▌▀▐▄)
-  | "ascii-spinner"     // ✅ le grand classique (|/-\)
-  | "shade-pulse"       // ✅ une cellule qui respire en densité (░▒▓█)
-  | "breathing-dot"     // ✅ un point qui respire (·•●) + pulse
-  | "equalizer"         // ✅ barres façon VU-mètre (▁▂▃…█)
-  | "scanner"           // ✅ point qui balaie avec traînée (Cylon)
-  | "sonar"             // ✅ onde qui se propage du centre
-  | "shimmer"           // ✅ bloc brillant qui glisse (█▓▒░)
-  // ── Braille (PAS en Consolas) ──
-  | "braille-spinner"   // ⚠ un braille qui tourne (⠋⠙⠹…)
-  | "braille-orbit"     // ⚠ braille plein dont le trou orbite (⢿⣻⣽…)
-  | "half-moon";        // ⚠ demi-cercle qui tourne (◐◓◑◒) — couverture incertaine
+/** Default expression for any tool. */
+const DEFAULT_TOOL_EXPRESSION = "doing something complex...";
 
-/** Style actif. Essaie-les un par un. */
-const ANIM_STYLE: AnimStyle = "equalizer";
-
-/** Expression par défaut pour tout tool */
-const DEFAULT_TOOL_EXPRESSION = "fait un truc complexe...";
-
-/** Expressions pendant la réflexion pure (pas de tool) */
+/** Expressions during pure thinking (no tool). */
 const THINKING_EXPRESSIONS = [
-  "pense très fort...",
-  "réfléchit...",
-  "remue ses neurones...",
-  "cuisine une réponse...",
-  "fait des calculs...",
-  "agite ses circuits...",
-  "brasse des tokens...",
+  "thinking hard...",
+  "pondering...",
+  "cranking its neurons...",
+  "cooking up an answer...",
+  "crunching numbers...",
+  "stirring its circuits...",
+  "shuffling tokens...",
 ];
 
-/** Dernier tool en cours d'exécution (lu par l'éditeur) */
+/** Last tool currently executing (read by the editor). */
 let activeToolName: string | null = null;
 
-// ── Réglages de l'animation de frappe (blanchiment ∝ vitesse) ──
-/** WPM à partir duquel la barre devient totalement blanche */
+// ── Typing-animation settings (whitening ∝ speed) ──────────
+/** WPM at which the bar turns fully white. */
 const TYPING_WHITE_WPM = 300;
-/** Fenêtre glissante d'échantillonnage de la vitesse de frappe (ms) */
+/** Sliding sampling window for typing speed (ms). */
 const TYPING_WINDOW_MS = 1000;
-/** Plafond de caractères comptés par évènement (un coller ne blanchit pas d'un coup) */
+/** Cap on characters counted per event (a paste must not whiten all at once). */
 const TYPING_DELTA_CAP = 4;
-/** Montée vers la cible par frame (gros = réactif). La montée était parfaite. */
+/** Rise toward the target per frame (larger = snappier). */
 const TYPING_ATTACK = 0.2;
-/** Descente par frame une fois le débounce écoulé (proche de 1 = fondu doux ~1-2s) */
+/** Fall per frame once the debounce elapses (close to 1 = soft fade ~1-2s). */
 const TYPING_RELEASE = 0.80;
-/** Débounce (ms) : on tient l'intensité courante après le dernier caractère avant de fondre */
+/** Debounce (ms): hold the current intensity after the last character before fading. */
 const TYPING_IDLE_MS = 150;
 /**
- * Plafond d'intensité, volontairement > 1 (= au-delà du blanc). lerpToWhite clampe
- * à 1, donc tout ce qui dépasse reste blanc PUR : ce « headroom » absorbe le
- * scintillement (±) à pleine vitesse pour que la barre RESTE blanche sans saccade,
- * tout en gardant un scintillement visible dans la zone intermédiaire (< 1).
+ * Intensity cap, deliberately > 1 (= beyond white). lerpToWhite clamps to 1, so
+ * anything above stays PURE white: this "headroom" absorbs the flicker (±) at
+ * full speed so the bar STAYS white without stutter, while keeping a visible
+ * flicker in the intermediate zone (< 1).
  */
 const TYPING_MAX = 1.2;
-/** Decay du pulse métriques par frame 16ms (0.91 ≈ fondu ~1.5s) */
+/** Metrics-pulse decay per 16ms frame (0.91 ≈ ~1.5s fade). */
 const METRIC_RELEASE = 0.95;
 
 /**
- * Construit une bordure horizontale avec texte à gauche et à droite.
+ * Builds a horizontal border with text on the left and on the right.
  *
- * @param left   Texte à gauche (ex: " anthropic/claude-sonnet-4-5 · high ")
- * @param right  Texte à droite (ex: " 0.015$ · 15.2K (2.1K|8.3K) · 12.3% ")
- * @param width  Largeur totale de la ligne
- * @param color  Fonction de coloration (this.borderColor)
+ * @param left   Left text (e.g. " anthropic/claude-sonnet-4-5 · high ")
+ * @param right  Right text (e.g. " 0.015$ · 15.2K (2.1K|8.3K) · 12.3% ")
+ * @param width  Total line width
+ * @param color  Coloring function (this.borderColor)
  * @param top    true → ╭─╮, false → ╰─╯
  */
 function fitRoundedBorder(
@@ -176,7 +183,7 @@ function formatCwd(cwd: string): string {
   return cwd;
 }
 
-/** Formate une durée en secondes → "5m 12s" ou "1h 23m" */
+/** Formats a duration in seconds → "5m 12s" or "1h 23m". */
 function formatDuration(seconds: number): string {
   if (seconds < 1) return "<1s";
   if (seconds < 60) return `${seconds}s`;
@@ -188,13 +195,13 @@ function formatDuration(seconds: number): string {
   return `${hours}h ${mins}m`;
 }
 
-/** Estimation brute de tokens (4 caracteres ≈ 1 token pour mix FR/EN/CODE) */
+/** Rough token estimate (4 characters ≈ 1 token for a FR/EN/CODE mix). */
 function estimateTokens(text: string): number {
   if (!text || text.trim().length === 0) return 0;
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
-/** Extrait les infos de session depuis les entrees */
+/** Extracts session info from the entries. */
 function computeSessionInfo(entries: readonly any[]): {
   turnCount: number;
   sessionStartTs: number;
@@ -218,7 +225,7 @@ function computeSessionInfo(entries: readonly any[]): {
   return { turnCount, sessionStartTs, lastPromptTs };
 }
 
-/** Calcule les metriques cumulees des messages assistant dans la session */
+/** Computes the cumulative metrics of the assistant messages in the session. */
 function computeSessionMetrics(entries: readonly any[]): {
   input: number;
   output: number;
@@ -251,9 +258,9 @@ function computeSessionMetrics(entries: readonly any[]): {
   };
 }
 
-/** Cumule les métriques de tous les messages assistant depuis le dernier message utilisateur */
+/** Sums the metrics of every assistant message since the last user message. */
 function computeLastTurnMetrics(entries: readonly any[]): { input: number; output: number; cacheRead: number; cost: number } | null {
-  // Trouver le dernier message utilisateur (début du tour en cours)
+  // Find the last user message (start of the current turn).
   let lastUserIdx = -1;
   for (let i = entries.length - 1; i >= 0; i--) {
     if (entries[i].type === "message" && entries[i].message?.role === "user") {
@@ -263,7 +270,7 @@ function computeLastTurnMetrics(entries: readonly any[]): { input: number; outpu
   }
   if (lastUserIdx === -1) return null;
 
-  // Cumuler tous les assistants après ce message (multi-tool calls d'un même tour)
+  // Sum every assistant message after it (multi-tool calls within one turn).
   let input = 0, output = 0, cacheRead = 0, cost = 0;
   for (let i = lastUserIdx + 1; i < entries.length; i++) {
     const entry = entries[i];
@@ -280,15 +287,16 @@ function computeLastTurnMetrics(entries: readonly any[]): { input: number; outpu
   return null;
 }
 
-// ── Manipulation de luminosité, compatible truecolor ET 256-couleurs ──
-// pi rend les couleurs en truecolor (\x1b[38;2;r;g;bm) seulement si COLORTERM=truecolor ;
-// sinon en 256-couleurs (\x1b[38;5;Nm). On gère les deux : on parse → RGB, on décale la
-// luminosité en RGB, puis on réémet DANS LE MÊME MODE (sinon le pulse serait un no-op en 256).
+// ── Brightness manipulation, works in BOTH truecolor AND 256-color ──
+// pi renders colors in truecolor (\x1b[38;2;r;g;bm) only when COLORTERM=truecolor;
+// otherwise in 256-color (\x1b[38;5;Nm). We handle both: parse → RGB, shift the
+// brightness in RGB, then re-emit IN THE SAME MODE (otherwise the pulse would be a
+// no-op in 256-color).
 
-/** Niveaux de la rampe du cube 6×6×6 xterm-256 */
+/** Levels of the xterm-256 6×6×6 color cube ramp. */
 const CUBE_LEVELS = [0, 95, 135, 175, 215, 255];
 
-/** 16 couleurs système xterm (approximation RVB standard) */
+/** 16 xterm system colors (standard RGB approximation). */
 const ANSI16_RGB: [number, number, number][] = [
   [0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0],
   [0, 0, 128], [128, 0, 128], [0, 128, 128], [192, 192, 192],
@@ -296,7 +304,7 @@ const ANSI16_RGB: [number, number, number][] = [
   [0, 0, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255],
 ];
 
-/** Index palette 256 → RVB */
+/** Palette-256 index → RGB. */
 function ansi256ToRgb(n: number): [number, number, number] {
   if (n < 16) return ANSI16_RGB[n];
   if (n >= 232) { const v = 8 + (n - 232) * 10; return [v, v, v]; }
@@ -308,7 +316,7 @@ function ansi256ToRgb(n: number): [number, number, number] {
   ];
 }
 
-/** Niveau du cube le plus proche d'une valeur de canal (0..255) */
+/** Cube level nearest to a channel value (0..255). */
 function nearestCubeIndex(v: number): number {
   let best = 0, bestDist = Infinity;
   for (let i = 0; i < CUBE_LEVELS.length; i++) {
@@ -318,7 +326,7 @@ function nearestCubeIndex(v: number): number {
   return best;
 }
 
-/** RVB → index palette 256 le plus proche (cube, ou rampe de gris si quasi-neutre) */
+/** RGB → nearest palette-256 index (cube, or gray ramp if near-neutral). */
 function rgbTo256(r: number, g: number, b: number): number {
   const spread = Math.max(r, g, b) - Math.min(r, g, b);
   if (spread < 10) {
@@ -328,7 +336,7 @@ function rgbTo256(r: number, g: number, b: number): number {
   return 16 + 36 * nearestCubeIndex(r) + 6 * nearestCubeIndex(g) + nearestCubeIndex(b);
 }
 
-/** Parse une couleur ANSI fg (truecolor ou 256) → RVB + mode d'origine */
+/** Parses an ANSI fg color (truecolor or 256) → RGB + original mode. */
 function parseFgAnsi(ansi: string): { rgb: [number, number, number]; mode: "truecolor" | "256" } | null {
   let m = ansi.match(/\x1b\[38;2;(\d+);(\d+);(\d+)m/);
   if (m) return { rgb: [+m[1], +m[2], +m[3]], mode: "truecolor" };
@@ -338,12 +346,13 @@ function parseFgAnsi(ansi: string): { rgb: [number, number, number]; mode: "true
 }
 
 /**
- * Colore `text` avec l'accent `baseAnsi` décalé en luminosité de `amount` (±RVB par canal).
- * Réémet dans le mode d'origine (truecolor ou 256), donc le pulse marche dans les deux.
+ * Colors `text` with the accent `baseAnsi` shifted in brightness by `amount`
+ * (±RGB per channel). Re-emits in the original mode (truecolor or 256), so the
+ * pulse works in both.
  */
 function shadeFgAnsi(baseAnsi: string, amount: number, text: string): string {
   const p = parseFgAnsi(baseAnsi);
-  if (!p) return `${baseAnsi}${text}\x1b[39m`; // format inconnu → accent brut
+  if (!p) return `${baseAnsi}${text}\x1b[39m`; // unknown format → raw accent
   const r = Math.max(0, Math.min(255, p.rgb[0] + amount));
   const g = Math.max(0, Math.min(255, p.rgb[1] + amount));
   const b = Math.max(0, Math.min(255, p.rgb[2] + amount));
@@ -354,11 +363,11 @@ function shadeFgAnsi(baseAnsi: string, amount: number, text: string): string {
 }
 
 /**
- * Interpole linéairement `baseAnsi` vers le blanc pur selon `t` (0 = accent,
- * 1 = blanc #ffffff). Contrairement à shadeFgAnsi (+amount par canal, sature à
- * 255 mais garde la teinte si un canal est déjà haut), ce lerp garantit du blanc
- * vrai à t=1 — c'est ce que veut l'effet de frappe rapide. Réémet dans le mode
- * d'origine (truecolor / 256).
+ * Linearly interpolates `baseAnsi` toward pure white by `t` (0 = accent,
+ * 1 = white #ffffff). Unlike shadeFgAnsi (+amount per channel, saturates at 255
+ * but keeps the hue when a channel is already high), this lerp guarantees true
+ * white at t=1 — which is what the fast-typing effect wants. Re-emits in the
+ * original mode (truecolor / 256).
  */
 function lerpToWhite(baseAnsi: string, t: number, text: string): string {
   const p = parseFgAnsi(baseAnsi);
@@ -373,115 +382,29 @@ function lerpToWhite(baseAnsi: string, t: number, text: string): string {
 }
 
 interface AnimColors {
-  /** accent vif qui pulse (luminosité oscillante) */
-  pulse: (s: string) => string;
-  /** fond discret */
-  muted: (s: string) => string;
-  /** accent éclairci (amount>0) ou assombri (amount<0) de `amount` par canal RVB */
+  /** accent lightened (amount>0) or darkened (amount<0) by `amount` per RGB channel */
   shade: (s: string, amount: number) => string;
-  /** décalage de luminosité du pulse global (oscille avec le sinus, ~ -50..+50) */
+  /** brightness offset of the global pulse (oscillates with the sine, ~ -50..+50) */
   pulseOffset: number;
 }
 
 /**
- * Rend le cluster de glyphes d'animation selon ANIM_STYLE.
- * `elapsed` = ms depuis le début de la réflexion. Retourne une chaîne déjà colorée.
+ * Renders the equalizer glyph cluster (VU-meter-style bars ▁▂▃…█).
+ * `elapsed` = ms since thinking started. Returns an already-colored string.
  */
 function renderThinkingGlyphs(elapsed: number, c: AnimColors): string {
-  switch (ANIM_STYLE) {
-    case "quadrant": {
-      // Point en coin qui tourne dans le sens horaire : haut-G → haut-D → bas-D → bas-G
-      const f = [..."▘▝▗▖"];
-      return c.pulse(f[Math.floor(elapsed / 110) % f.length]);
-    }
-    case "half-block": {
-      // Demi-bloc qui tourne sur les 4 côtés (gauche → haut → droite → bas)
-      const f = [..."▌▀▐▄"];
-      return c.pulse(f[Math.floor(elapsed / 130) % f.length]);
-    }
-    case "ascii-spinner": {
-      const f = [..."|/-\\"];
-      return c.pulse(f[Math.floor(elapsed / 100) % f.length]);
-    }
-    case "shade-pulse": {
-      // Une cellule qui monte/descend en densité (respiration)
-      const shades = [..."░▒▓█"];
-      const t = (Math.sin(elapsed / 280) + 1) / 2; // 0..1
-      const idx = Math.round(t * (shades.length - 1));
-      return c.pulse(shades[idx]);
-    }
-    case "braille-spinner": {
-      const f = [..."⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"];
-      return c.pulse(f[Math.floor(elapsed / 80) % f.length]);
-    }
-    case "braille-orbit": {
-      const f = [..."⢿⣻⣽⣾⣷⣯⣟⡿"];
-      return c.pulse(f[Math.floor(elapsed / 90) % f.length]);
-    }
-    case "half-moon": {
-      const f = [..."◐◓◑◒"];
-      return c.pulse(f[Math.floor(elapsed / 140) % f.length]);
-    }
-    case "breathing-dot": {
-      const sizes = [..."·•●"];
-      const t = (Math.sin(elapsed / 320) + 1) / 2; // 0..1
-      const idx = Math.round(t * (sizes.length - 1));
-      return c.pulse(sizes[idx]);
-    }
-    case "equalizer": {
-      const bars = [..."▁▂▃▄▅▆▇█"];
-      let out = "";
-      for (let i = 0; i < 5; i++) {
-        const t = (Math.sin(elapsed / 150 + i * 0.9) + 1) / 2; // 0..1, déphasé
-        const lvl = Math.round(t * (bars.length - 1));
-        // hauteur (lvl*6) + pulse global qui fait respirer toute la barre
-        out += c.shade(bars[lvl], lvl * 6 + c.pulseOffset);
-      }
-      return out;
-    }
-    case "scanner": {
-      const w = 6;
-      const period = (w - 1) * 2;
-      const step = Math.floor(elapsed / 70) % period;
-      const head = step < w ? step : period - step; // rebond 0→5→0
-      let out = "";
-      for (let i = 0; i < w; i++) {
-        const d = Math.abs(i - head);
-        if (d === 0) out += c.pulse("●");
-        else if (d <= 2) out += c.shade("·", -d * 45); // traînée qui s'estompe
-        else out += c.muted("·");
-      }
-      return out;
-    }
-    case "sonar": {
-      const w = 5;
-      const center = 2;
-      const r = Math.floor(elapsed / 130) % (center + 2); // rayon 0→3 (3 = silence)
-      let out = "";
-      for (let i = 0; i < w; i++) {
-        const d = Math.abs(i - center);
-        if (r <= center && d === r) out += c.pulse("●");
-        else if (r <= center && d < r) out += c.shade("·", -(r - d) * 40);
-        else out += c.muted("·");
-      }
-      return out;
-    }
-    case "shimmer": {
-      const w = 5;
-      const head = Math.floor(elapsed / 110) % w;
-      const trail = [..."█▓▒░"];
-      let out = "";
-      for (let i = 0; i < w; i++) {
-        const behind = (head - i + w) % w; // 0 = tête, croît vers l'arrière
-        if (behind < trail.length) out += c.shade(trail[behind], -behind * 22);
-        else out += c.muted("░");
-      }
-      return out;
-    }
+  const bars = [..."▁▂▃▄▅▆▇█"];
+  let out = "";
+  for (let i = 0; i < 5; i++) {
+    const t = (Math.sin(elapsed / 150 + i * 0.9) + 1) / 2; // 0..1, phase-shifted
+    const lvl = Math.round(t * (bars.length - 1));
+    // height (lvl*6) + global pulse that makes the whole bar breathe
+    out += c.shade(bars[lvl], lvl * 6 + c.pulseOffset);
   }
+  return out;
 }
 
-// ── Éditeur custom ───────────────────────────────────────
+// ── Custom editor ─────────────────────────────────────────
 
 interface EditorContext {
   pi: ExtensionAPI;
@@ -489,12 +412,12 @@ interface EditorContext {
 }
 
 /**
- * Éditeur qui s'encadre d'un rectangle arrondi ╭─╮│╰─╯
- * avec infos réparties gauche/droite dans la bordure haute,
- * caractère de prompt π sur la première ligne de contenu.
+ * Editor that frames itself with a rounded rectangle ╭─╮│╰─╯, with info spread
+ * left/right in the top border and a π prompt character on the first content
+ * line.
  *
- * Le rendu est construit from scratch via layoutText() pour un
- * contrôle total sur l'espacement du π.
+ * The render is built from scratch via layoutText() for full control over the
+ * spacing around the π.
  */
 class NerismaInputEditor extends CustomEditor {
   private ext: EditorContext;
@@ -504,31 +427,31 @@ class NerismaInputEditor extends CustomEditor {
   private _wasPulsing: boolean = false;
   private _animStart: number = 0;
   private _lastInputText: string = "";
-  /** Évènements de frappe récents (timestamp + nb de caractères ajoutés) pour estimer les WPM */
+  /** Recent typing events (timestamp + number of characters added) to estimate WPM. */
   private _keyEvents: { t: number; n: number }[] = [];
-  /** Intensité de frappe lissée 0..1 (0 = accent, 1 = blanc) */
+  /** Smoothed typing intensity 0..1 (0 = accent, 1 = white). */
   private _typeIntensity: number = 0;
-  /** Timestamp de la dernière frappe (pilote la descente rapide une fois inactif) */
+  /** Timestamp of the last keystroke (drives the fast fall once idle). */
   private _lastKeyTime: number = 0;
-  /** Intensité du pulse métriques 0..1 (déclenché au changement de tour) */
+  /** Metrics-pulse intensity 0..1 (triggered on turn change). */
   private _metricPulse: number = 0;
-  /** Signature de la dernière valeur des métriques (détection de changement) */
+  /** Signature of the last metrics value (change detection). */
   private _lastMetricsSig: string = "";
-  /** Timer de decay du pulse métriques */
+  /** Metrics-pulse decay timer. */
   private _metricTimer: ReturnType<typeof setInterval> | undefined;
-  /** Pulse de la bordure à l'envoi d'un message (détection texte non-vide → vide) */
+  /** Border pulse on message submit (detected via non-empty text → empty). */
   private _submitPulse: number = 0;
-  /** Timer de decay du pulse de soumission */
+  /** Submit-pulse decay timer. */
   private _submitTimer: ReturnType<typeof setInterval> | undefined;
-  /** Pulse du compteur ~X tok quand il s'actualise */
+  /** Pulse of the ~X tok counter when it updates. */
   private _tokPulse: number = 0;
-  /** Timer de decay du pulse ~tok */
+  /** ~tok pulse decay timer. */
   private _tokTimer: ReturnType<typeof setInterval> | undefined;
-  /** Dernière valeur de tokEstimate pour détection de changement */
+  /** Last tokEstimate value for change detection. */
   private _lastTokValue: number = -1;
-  /** Compteur de mises à jour des métriques (affiché entre parenthèses après T) */
+  /** Metrics update counter (shown in parentheses after T). */
   private _metricUpdateCount: number = 0;
-  /** Cache du dernier tour complété (affiché tant que le tour courant n'a pas de réponse) */
+  /** Cache of the last completed turn (shown while the current turn has no reply yet). */
   private _lastCompletedTurn: {
     turnNum: number;
     cost: number;
@@ -544,7 +467,7 @@ class NerismaInputEditor extends CustomEditor {
     keybindings: KeybindingsManager,
     ext: EditorContext,
   ) {
-    // paddingX à 1 pour garder un léger confort visuel interne
+    // paddingX at 1 keeps a little inner visual comfort
     super(tui, theme, keybindings, { paddingX: 0 });
     this.ext = ext;
   }
@@ -613,7 +536,7 @@ class NerismaInputEditor extends CustomEditor {
     const { pi, ctx } = this.ext;
     const thm = ctx.ui.theme;
 
-    // ── Animation bordure pendant réflexion ────────────
+    // ── Border animation while thinking ────────────────
     const isThinking = !ctx.isIdle();
     if (isThinking && !this._wasThinking) {
       this._startThinkingAnimation();
@@ -632,10 +555,10 @@ class NerismaInputEditor extends CustomEditor {
     const syntaxCommentAnsi = thm.getFgAnsi("syntaxComment");
     const dimAnsi = thm.getFgAnsi("dim");
 
-    // Applique lerpToWhite à partir de l'ANSI d'origine selon _metricPulse.
-    // Quand pulse=0 : couleur d'origine exacte. Quand pulse=1 : blanc pur.
-    // Lecture directe de this._metricPulse (pas de capture figée) pour que la
-    // détection de changement plus bas mette à jour la valeur AVANT pulsedText.
+    // Applies lerpToWhite from the original ANSI based on _metricPulse.
+    // When pulse=0: exact original color. When pulse=1: pure white.
+    // Reads this._metricPulse directly (no frozen capture) so the change
+    // detection below updates the value BEFORE pulsedText runs.
     const pulsedText = (ansi: string, text: string, curve: number = 1) => {
       const mp = this._metricPulse;
       const intensity = Math.pow(mp, curve);
@@ -647,14 +570,14 @@ class NerismaInputEditor extends CustomEditor {
     const dim = (s: string) => thm.fg("dim", s);
     const borderAccent = (s: string) => thm.fg("borderAccent", s);
 
-    // ── Vitesse de frappe → blanchiment de la barre (INDÉPENDANT du thinking) ──
-    // On échantillonne les caractères ajoutés sur une fenêtre glissante → WPM,
-    // normalisés en intensité 0..1 (TYPING_WHITE_WPM ⇒ 1 ⇒ blanc pur). La fenêtre
-    // glissante fait décroître l'intensité toute seule quand on arrête de taper.
+    // ── Typing speed → bar whitening (INDEPENDENT of thinking) ──
+    // We sample the characters added over a sliding window → WPM, normalized to
+    // an intensity 0..1 (TYPING_WHITE_WPM ⇒ 1 ⇒ pure white). The sliding window
+    // makes the intensity decay on its own once typing stops.
     const currentText = this.getText();
     if (currentText !== this._lastInputText) {
       const delta = currentText.length - this._lastInputText.length;
-      // Détection d'envoi : texte non-vide → vide (message soumis ou clear all)
+      // Submit detection: non-empty text → empty (message submitted or clear all).
       if (this._lastInputText !== "" && currentText === "") {
         this._submitPulse = 1.0;
         if (!this._submitTimer) {
@@ -676,12 +599,12 @@ class NerismaInputEditor extends CustomEditor {
     }
     this._keyEvents = this._keyEvents.filter((e) => now - e.t < TYPING_WINDOW_MS);
     const charsInWindow = this._keyEvents.reduce((s, e) => s + e.n, 0);
-    const wpm = (charsInWindow / 5) * (60000 / TYPING_WINDOW_MS); // 1 mot = 5 caractères
-    const targetIntensity = Math.max(0, Math.min(TYPING_MAX, wpm / TYPING_WHITE_WPM)); // capé > 1 (headroom blanc)
-    // Asymétrie attack/release :
-    //   - tant qu'on tape (idle court) → montée rapide vers la cible (inchangé).
-    //   - dès qu'on arrête (idle > seuil) → descente EXPONENTIELLE propre, qui ne
-    //     dépend plus de la fenêtre glissante (sinon ça restait blanc ~800ms).
+    const wpm = (charsInWindow / 5) * (60000 / TYPING_WINDOW_MS); // 1 word = 5 characters
+    const targetIntensity = Math.max(0, Math.min(TYPING_MAX, wpm / TYPING_WHITE_WPM)); // capped > 1 (white headroom)
+    // Attack/release asymmetry:
+    //   - while typing (short idle) → fast rise toward the target.
+    //   - once typing stops (idle > threshold) → clean EXPONENTIAL fall that no
+    //     longer depends on the sliding window (otherwise it stayed white ~800ms).
     if (now - this._lastKeyTime > TYPING_IDLE_MS) {
       this._typeIntensity *= TYPING_RELEASE;
     } else {
@@ -689,7 +612,7 @@ class NerismaInputEditor extends CustomEditor {
     }
     if (this._typeIntensity < 0.01) this._typeIntensity = 0;
 
-    // Timer d'animation frappe : tourne tant qu'il reste de l'intensité à dissiper.
+    // Typing-animation timer: runs as long as there is intensity left to dissipate.
     const isPulsing = this._typeIntensity > 0 || this._keyEvents.length > 0;
     if (isPulsing && !this._wasPulsing) {
       this._startInputAnimation();
@@ -699,35 +622,34 @@ class NerismaInputEditor extends CustomEditor {
     }
     this._wasPulsing = isPulsing;
 
-    // ── Oscillation du thinking : sinusoïdale, propre, INDÉPENDANTE de la frappe ──
-    // C'est elle (et elle seule) qui anime l'equalizer + le mot de réflexion.
-    // Bug précédent : l'equalizer était piloté par le pulse de frappe via une
-    // couleur commune ; ici il a son propre rythme.
+    // ── Thinking oscillation: sinusoidal, clean, INDEPENDENT of typing ──
+    // This (and only this) animates the equalizer + the thinking word. The
+    // equalizer has its own rhythm, separate from the typing pulse.
     const thinkOffset = isThinking ? Math.round(Math.sin(now / 120) * 75) : 0;
     const thinkColor = (s: string) => shadeFgAnsi(accentAnsi, thinkOffset, s);
 
-    // ── Couleur de la barre (bordure + π) ──
-    // CONDITIONNÉE UNIQUEMENT PAR LA FRAPPE. Jamais par le thinking : pendant que
-    // le modèle réfléchit, la bordure reste à l'accent fixe (c'est l'equalizer, sur
-    // sa propre ligne, qui montre l'activité). Blanchiment + léger scintillement
-    // dont l'amplitude ∝ vitesse (« scintille » quand on tape vite).
+    // ── Bar color (border + π) ──
+    // DRIVEN ONLY BY TYPING. Never by thinking: while the model thinks, the
+    // border stays at the fixed accent (the equalizer, on its own line, shows the
+    // activity). Whitening + slight flicker whose amplitude ∝ speed ("shimmers"
+    // when typing fast).
     const typeT = this._typeIntensity > 0.001
       ? Math.max(0, Math.min(1, this._typeIntensity + Math.sin(now / 70) * 0.12 * this._typeIntensity))
       : 0;
-    // Pulse de soumission : se déclenche quand l'utilisateur envoie un message
-    // (détecté par le passage texte non-vide → vide). Combiné avec le pulse de
-    // frappe par maximum : l'envoi fait un flash blanc bref.
+    // Submit pulse: triggers when the user sends a message (detected by the
+    // non-empty text → empty transition). Combined with the typing pulse via
+    // max: submitting produces a brief white flash.
     const submitT = this._submitPulse;
     const borderT = Math.max(typeT, submitT);
     const borderColorFn = (s: string) => {
       if (borderT > 0.001) return lerpToWhite(accentAnsi, borderT, s);
       return accent(s);
     };
-    // Le π suit EXACTEMENT la couleur de la bordure (même fonction).
+    // The π follows the border color EXACTLY (same function).
     const promptColorFn = borderColorFn;
 
 
-    // ── Métriques session (calcul unique, partagé 3 parties) ──
+    // ── Session metrics (single computation, shared by 3 parts) ──
     let entries: readonly any[] = [];
     let sessionElapsed = 0;
     let toolCount = 0;
@@ -735,7 +657,7 @@ class NerismaInputEditor extends CustomEditor {
     let metrics: ReturnType<typeof computeSessionMetrics> | null = null;
     let hasTurns = false;
     let turnCount = 0;
-    // Présence d'au moins une réponse assistant avec des métriques (output > 0)
+    // Whether there is at least one assistant reply with metrics (output > 0).
     let hasAssistantResponse = false;
 
     try {
@@ -746,18 +668,18 @@ class NerismaInputEditor extends CustomEditor {
       turnCount = info.turnCount;
       hasAssistantResponse = metrics !== null && metrics.output > 0;
       sessionElapsed = info.sessionStartTs ? Math.round((Date.now() - info.sessionStartTs) / 1000) : 0;
-      const wireTools = effectiveToolNames(pi, ctx.cwd, process.env.PI_ACTIVE_AGENT);
+      const wireTools = effectiveToolNames(pi);
       toolCount = wireTools.length;
       tokEstimate = estimateTokens(this.getText());
     } catch {}
 
-    // Détection de changement de métriques → pulse vers le blanc
+    // Metrics change detection → pulse toward white.
     if (hasAssistantResponse) {
       const sig = `${turnCount}|${metrics!.cost}|${metrics!.output}`;
       if (sig !== this._lastMetricsSig) {
         this._lastMetricsSig = sig;
         this._metricUpdateCount++;
-        this._metricPulse = 1.0; // (re)trigger depuis la couleur courante, pas la base
+        this._metricPulse = 1.0; // (re)trigger from the current color, not the base
         if (!this._metricTimer) {
           this._metricTimer = setInterval(() => {
             this._metricPulse *= METRIC_RELEASE;
@@ -771,7 +693,7 @@ class NerismaInputEditor extends CustomEditor {
       }
     }
 
-    // ── Partie gauche : agent · model · thinking · cwd · durée · tools · ~tok ──
+    // ── Left part: agent · model · thinking · cwd · duration · tools · ~tok ──
     const leftParts: string[] = [];
 
     const activeAgent = process.env.PI_ACTIVE_AGENT;
@@ -787,11 +709,11 @@ class NerismaInputEditor extends CustomEditor {
 
     if (ctx.cwd) leftParts.push(muted(formatCwd(ctx.cwd)));
 
-    // Infos session : durée · outils · ~tok
+    // Session info: duration · tools · ~tok
     leftParts.push(thm.fg("dim", formatDuration(sessionElapsed)));
     leftParts.push(muted(`${toolCount} tools`));
 
-    // Pulse ~X tok quand il s'actualise (tous les ~4 caractères tapés)
+    // Pulse ~X tok when it updates (every ~4 characters typed).
     if (tokEstimate > 0) {
       if (tokEstimate !== this._lastTokValue) {
         this._lastTokValue = tokEstimate;
@@ -816,15 +738,15 @@ class NerismaInputEditor extends CustomEditor {
       this._lastTokValue = -1;
     }
 
-    // ── Partie droite : global · coût · OUT · HIT · MISS session ──
+    // ── Right part: session label · cost · OUT · HIT · MISS ──
     let rightText = "";
-    // `hasAssistantResponse` implique déjà `metrics !== null` (cf. calcul plus
-    // haut) ; on l'explicite ici pour que TS narrow `metrics` dans le bloc.
+    // `hasAssistantResponse` already implies `metrics !== null` (see computation
+    // above); we spell it out here so TS narrows `metrics` inside the block.
     if (hasAssistantResponse && metrics) {
       try {
         const rightParts: string[] = [];
 
-        // Label session — accent · pourcentage de contexte utilisé
+        // Session label — accent · percentage of context used.
         rightParts.push(pulsedText(accentAnsi, "SESSION"));
         try {
           const usage = ctx.getContextUsage();
@@ -836,7 +758,7 @@ class NerismaInputEditor extends CustomEditor {
           }
         } catch {}
 
-        // Coût session — warning (3 décimales)
+        // Session cost — warning (3 decimals).
         if (metrics.cost > 0)
           rightParts.push(pulsedText(warningAnsi, `${metrics.cost.toFixed(3)}$`));
 
@@ -857,16 +779,16 @@ class NerismaInputEditor extends CustomEditor {
       } catch {}
     }
 
-    // ── Assemblage ──────────────────────────────────────
+    // ── Assembly ────────────────────────────────────────
     const leftText = leftParts.length > 0 ? ` ${leftParts.join(` ${dim("·")} `)} ` : "";
 
-    // ── Construire le rendu final ───────────────────────
+    // ── Build the final render ──────────────────────────
     const result: string[] = [];
 
-    // ── Ligne d'animation thinking ────────────────────────
+    // ── Thinking animation line ───────────────────────────
     if (isThinking) {
       const elapsed = Date.now() - this._animStart;
-      // Choisir l'expression selon le contexte
+      // Pick the expression based on context.
       let expression: string;
       if (activeToolName) {
         expression = DEFAULT_TOOL_EXPRESSION;
@@ -875,8 +797,6 @@ class NerismaInputEditor extends CustomEditor {
       }
       const wordStr = ` ${thinkColor(expression)}`;
       const glyphs = renderThinkingGlyphs(elapsed, {
-        pulse: thinkColor,
-        muted,
         shade: (s, amount) => shadeFgAnsi(accentAnsi, amount, s),
         pulseOffset: thinkOffset,
       });
@@ -887,22 +807,22 @@ class NerismaInputEditor extends CustomEditor {
       result.push("");
     }
 
-    // Ligne du haut : ╭─...─╮
+    // Top line: ╭─...─╮
     result.push(fitRoundedBorder(leftText, rightText, width, borderColorFn, true));
 
-    // ── Contenu : word-wrapping via layoutText() ───────
-    // On réserve `π ` au début de la première ligne
+    // ── Content: word-wrapping via layoutText() ─────────
+    // We reserve `π ` at the start of the first line.
     const promptChar = promptColorFn("π");
     const promptPrefix = ` ${promptChar} `;
     const promptWidth = visibleWidth(promptPrefix);
     const layoutWidth = Math.max(1, innerWidth - promptWidth);
     (this as any).lastWidth = layoutWidth;
 
-    // Utiliser layoutText() hérité de Editor pour le word-wrapping
-    // (préserve les paste markers, la segmentation, etc.)
+    // Use Editor's inherited layoutText() for word-wrapping
+    // (preserves paste markers, segmentation, etc.).
     const layoutLines = (this as any).layoutText(layoutWidth);
 
-    // Largeur max dispo pour le texte (hors bordures │ et préfixe π)
+    // Max width available for the text (excluding the │ borders and π prefix).
     const maxTextWidth = innerWidth - promptWidth;
 
     for (let i = 0; i < layoutLines.length; i++) {
@@ -910,39 +830,39 @@ class NerismaInputEditor extends CustomEditor {
       let displayText = ll.text;
       let lineWidth = visibleWidth(ll.text);
 
-      // Ajouter le curseur si cette ligne le porte
+      // Add the cursor if this line carries it.
       if (ll.hasCursor && ll.cursorPos !== undefined) {
         const before = displayText.slice(0, ll.cursorPos);
         const after = displayText.slice(ll.cursorPos);
 
         if (after.length > 0) {
-          // Curseur sur un caractère — l'inverser
+          // Cursor on a character — invert it.
           const segs = [...(this as any).segment(after, "grapheme")];
           const firstG = segs[0]?.segment || "";
           const rest = after.slice(firstG.length);
           displayText = before + `\x1b[7m${firstG}\x1b[0m` + rest;
-          // lineWidth unchanged (remplacement, pas ajout)
+          // lineWidth unchanged (replacement, not addition)
         } else {
-          // Curseur en fin de ligne — espace inversé
+          // Cursor at end of line — inverted space.
           displayText = before + "\x1b[7m \x1b[0m";
           lineWidth += 1;
         }
       }
 
-      // Troncature de sécurité : la ligne assemblée ne doit pas dépasser width
+      // Safety truncation: the assembled line must not exceed width.
       if (lineWidth > maxTextWidth) {
         displayText = truncateToWidth(displayText, maxTextWidth);
         lineWidth = maxTextWidth;
       }
 
       if (i === 0) {
-        // Première ligne : préfixer avec " π "
+        // First line: prefix with " π ".
         const finalWidth = promptWidth + lineWidth;
         const padding = Math.max(0, innerWidth - finalWidth);
         result.push(borderColorFn("│") + promptPrefix + displayText + " ".repeat(padding) + borderColorFn("│"));
       } else {
-        // Lignes wrap / multilignes : indentées de promptWidth pour
-        // aligner le texte sous celui de la première ligne (après " π ").
+        // Wrapped / multi-line lines: indented by promptWidth to align the text
+        // under the first line's text (after " π ").
         const indent = " ".repeat(promptWidth);
         const finalWidth = promptWidth + lineWidth;
         const padding = Math.max(0, innerWidth - finalWidth);
@@ -950,9 +870,9 @@ class NerismaInputEditor extends CustomEditor {
       }
     }
 
-    // ── Autocomplete (slash commands, @mensions, etc.) ───
-    // Rendu hérité du parent Editor, inséré entre le contenu
-    // et la bordure basse du cadre.
+    // ── Autocomplete (slash commands, @mentions, etc.) ───
+    // Rendering inherited from the parent Editor, inserted between the content
+    // and the frame's bottom border.
     if ((this as any).autocompleteState && (this as any).autocompleteList) {
       const autoLines = (this as any).autocompleteList.render(innerWidth);
       for (const line of autoLines) {
@@ -967,21 +887,21 @@ class NerismaInputEditor extends CustomEditor {
       }
     }
 
-    // ── Coin bas-droit : tour · coût · OUT · HIT · MISS dernier tour ──
-    // Affiche le dernier tour COMPLÉTÉ (avec réponse assistant). Tant que le tour
-    // courant n'a pas de réponse, on conserve l'affichage du tour précédent.
+    // ── Bottom-right corner: turn · cost · OUT · HIT · MISS for the last turn ──
+    // Shows the last COMPLETED turn (with an assistant reply). While the current
+    // turn has no reply, the previous turn's display is kept.
     let bottomRightText = "";
     if (hasAssistantResponse) try {
       const info = computeSessionInfo(entries);
       const bottomParts: string[] = [];
 
-      // Métriques dernier tour (même ordre que global : coût · OUT · HIT · MISS)
+      // Last-turn metrics (same order as the session: cost · OUT · HIT · MISS).
       const lastTurn = computeLastTurnMetrics(entries);
 
-      // Déterminer quel tour afficher : le tour courant s'il a des métriques,
-      // sinon le dernier tour complété (cache)
+      // Decide which turn to show: the current turn if it has metrics, otherwise
+      // the last completed turn (cache).
       if (lastTurn) {
-        // Tour courant complété → mettre à jour le cache
+        // Current turn completed → update the cache.
         const turnNum = info.turnCount > 0 ? info.turnCount : 0;
         const duration = (() => {
           const luts = info.lastPromptTs;
@@ -1005,7 +925,7 @@ class NerismaInputEditor extends CustomEditor {
         };
       }
 
-      // Utiliser le cache (tour complété le plus récent) pour l'affichage
+      // Use the cache (most recent completed turn) for the display.
       const display = this._lastCompletedTurn;
       if (display) {
         bottomParts.push(pulsedText(accentAnsi, `T${display.turnNum} (${this._metricUpdateCount})`));
@@ -1035,17 +955,24 @@ class NerismaInputEditor extends CustomEditor {
       // ignore
     }
 
-    // Ligne du bas : ╰─...─╯
+    // Bottom line: ╰─...─╯
     result.push(fitRoundedBorder("", bottomRightText, width, borderColorFn, false));
 
     return result;
   }
 }
 
-// ── Point d'entrée de l'extension ────────────────────────
+// ── Extension entry point ─────────────────────────────────
 
 export default function (pi: ExtensionAPI): void {
   let registered = false;
+
+  // Capture (by reference) the tools array packed into each provider request,
+  // so the UI can report exactly what was sent. Read-only: returning nothing
+  // leaves the payload unchanged.
+  pi.on("before_provider_request", (event) => {
+    lastWirePayloadTools = findToolsArray(event.payload);
+  });
 
   pi.on("session_start", (_event, ctx) => {
     if (registered) return;
@@ -1053,7 +980,7 @@ export default function (pi: ExtensionAPI): void {
 
     ctx.ui.setWorkingVisible(false);
 
-    // Footer complètement masqué
+    // Footer fully hidden.
     ctx.ui.setFooter(() => ({
       render() { return []; },
       invalidate() {},
@@ -1064,7 +991,7 @@ export default function (pi: ExtensionAPI): void {
     });
   });
 
-  // Tracker le tool en cours pour les expressions animées
+  // Track the running tool for the animated expressions.
   pi.on("tool_execution_start", (event) => {
     activeToolName = event.toolName;
   });
