@@ -2,27 +2,129 @@
  * pi-input-revamp — pi TUI extension
  *
  * Replaces pi's input editor (the prompt bar) with a full rounded frame, a π
- * prompt character, and tightly controlled spacing.
+ * prompt character, tightly controlled spacing, and fully configurable info
+ * elements in all four quadrants of the border.
  *
  * ┌─ agent · anthropic/claude-sonnet-4-5 · high ──── 0.015$ · 15.2K (2.1K|8.3K) · 12.3% ─╮
  * │ π hello world                                                                          │
- * ╰────────────────────────────────────────────────────────────────────────────────────────╯
+ * ╰─────────────────────────────────────────────────── T5 · 0.015$ · OUT 8.3K ─────────────╯
  *
- * The border uses the active theme's accent color.
- * The π is colored with accent, one column away from the border and one from the text.
+ * Layout is controlled by ~/.pi/pi-input-revamp.json:
  *
- * ── Technique ──
- *
- * Unlike most editor extensions that call super.render() and post-process the
- * result, this one builds the render from scratch using this.layoutText() for
- * word-wrapping. That gives full control over spacing and avoids interference
- * from the internal paddingX.
+ *   {
+ *     "layout": {
+ *       "topLeft": ["agent", "model", "thinking-level", ...],
+ *       "topRight": ["session-label", "cost", "out", ...],
+ *       "bottomLeft": [],
+ *       "bottomRight": ["turn", "cost", "out", ...]
+ *     },
+ *     "animations": { "typingPulse": true, ... }
+ *   }
  */
 
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+
+// ── Configuration types ──────────────────────────────────
+
+type ElementId =
+  | "agent" | "model" | "thinking-level" | "cwd"
+  | "duration" | "tools" | "tok"
+  | "session-label"
+  | "ctx-percent" | "ctx-tokens" | "ctx-tokens-max" | "ctx-tokens-full"
+  | "cost" | "out" | "hit" | "miss"
+  | "turn" | "turn-duration";
+
+interface InputRevampConfig {
+  layout: {
+    topLeft: ElementId[];
+    topRight: ElementId[];
+    bottomLeft: ElementId[];
+    bottomRight: ElementId[];
+  };
+  animations: {
+    typingPulse: boolean;
+    submitFlash: boolean;
+    metricPulse: boolean;
+    tokPulse: boolean;
+  };
+}
+
+const DEFAULT_CONFIG: InputRevampConfig = {
+  layout: {
+    topLeft: ["agent", "model", "thinking-level", "cwd", "duration", "tools", "tok"],
+    topRight: ["session-label", "ctx-percent", "ctx-tokens-full", "cost", "out", "hit", "miss"],
+    bottomLeft: [],
+    bottomRight: ["turn", "turn-duration", "cost", "out", "hit", "miss"],
+  },
+  animations: {
+    typingPulse: true,
+    submitFlash: true,
+    metricPulse: true,
+    tokPulse: true,
+  },
+};
+
+function writeDefaultConfig(path: string): void {
+  try {
+    const dir = path.substring(0, path.lastIndexOf("/"));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n", "utf8");
+  } catch {
+    // Best-effort: if we can't write, just use defaults in-memory
+  }
+}
+
+function loadConfig(): InputRevampConfig {
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    const configPath = `${home}/.pi/pi-input-revamp.json`;
+    if (existsSync(configPath)) {
+      const raw = readFileSync(configPath, "utf8");
+      const parsed = JSON.parse(raw) as Partial<InputRevampConfig>;
+      // Merge with defaults so missing fields fall back
+      return {
+        layout: {
+          topLeft: Array.isArray(parsed.layout?.topLeft)
+            ? parsed.layout!.topLeft
+            : DEFAULT_CONFIG.layout.topLeft,
+          topRight: Array.isArray(parsed.layout?.topRight)
+            ? parsed.layout!.topRight
+            : DEFAULT_CONFIG.layout.topRight,
+          bottomLeft: Array.isArray(parsed.layout?.bottomLeft)
+            ? parsed.layout!.bottomLeft
+            : DEFAULT_CONFIG.layout.bottomLeft,
+          bottomRight: Array.isArray(parsed.layout?.bottomRight)
+            ? parsed.layout!.bottomRight
+            : DEFAULT_CONFIG.layout.bottomRight,
+        },
+        animations: {
+          typingPulse:
+            parsed.animations?.typingPulse ?? DEFAULT_CONFIG.animations.typingPulse,
+          submitFlash:
+            parsed.animations?.submitFlash ?? DEFAULT_CONFIG.animations.submitFlash,
+          metricPulse:
+            parsed.animations?.metricPulse ?? DEFAULT_CONFIG.animations.metricPulse,
+          tokPulse:
+            parsed.animations?.tokPulse ?? DEFAULT_CONFIG.animations.tokPulse,
+        },
+      };
+    }
+
+    // File doesn't exist → create it with defaults, then return defaults
+    writeDefaultConfig(configPath);
+  } catch {
+    // Silently fall back to defaults
+  }
+  return {
+    ...DEFAULT_CONFIG,
+    layout: { ...DEFAULT_CONFIG.layout },
+    animations: { ...DEFAULT_CONFIG.animations },
+  };
+}
 
 // ── Tools actually sent on the wire ───────────────────────
 
@@ -76,10 +178,12 @@ function effectiveToolNames(pi: ExtensionAPI): string[] {
 
 // ── Formatting helpers ────────────────────────────────────
 
-/** Formats a token count (1200 → "1.2K", 1_500_000 → "1.5M"). */
+/** Formats a token count (1200 → "1K", 1_500_000 → "1.5M").
+ *  < 1M → integer (no decimal), ≥ 1M → one decimal.
+ */
 function formatTokens(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(2)}M`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(2)}K`;
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 1_000) return `${Math.round(count / 1_000)}K`;
   return `${count}`;
 }
 
@@ -111,18 +215,13 @@ const TYPING_WINDOW_MS = 1000;
 const TYPING_DELTA_CAP = 4;
 /** Rise toward the target per frame (larger = snappier). */
 const TYPING_ATTACK = 0.2;
-/** Fall per frame once the debounce elapses (close to 1 = soft fade ~1-2s). */
+/** Fall per frame once the debounce elapses. */
 const TYPING_RELEASE = 0.80;
-/** Debounce (ms): hold the current intensity after the last character before fading. */
+/** Debounce (ms): hold intensity after last character before fading. */
 const TYPING_IDLE_MS = 150;
-/**
- * Intensity cap, deliberately > 1 (= beyond white). lerpToWhite clamps to 1, so
- * anything above stays PURE white: this "headroom" absorbs the flicker (±) at
- * full speed so the bar STAYS white without stutter, while keeping a visible
- * flicker in the intermediate zone (< 1).
- */
+/** Cap >1 so the bar stays white at full speed (headroom absorbs flicker). */
 const TYPING_MAX = 1.2;
-/** Metrics-pulse decay per 16ms frame (0.91 ≈ ~1.5s fade). */
+/** Pulse decay per 16ms frame (0.95 ≈ ~1.5s fade). */
 const METRIC_RELEASE = 0.95;
 
 /**
@@ -232,7 +331,7 @@ function computeSessionMetrics(entries: readonly any[]): {
   cacheRead: number;
   cacheWrite: number;
   cost: number;
-} {
+} | null {
   let totalInput = 0;
   let totalOutput = 0;
   let totalCacheRead = 0;
@@ -249,13 +348,8 @@ function computeSessionMetrics(entries: readonly any[]): {
     }
   }
 
-  return {
-    input: totalInput,
-    output: totalOutput,
-    cacheRead: totalCacheRead,
-    cacheWrite: totalCacheWrite,
-    cost: totalCost,
-  };
+  if (totalInput === 0 && totalOutput === 0 && totalCost === 0) return null;
+  return { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, cost: totalCost };
 }
 
 /** Sums the metrics of every assistant message since the last user message. */
@@ -409,18 +503,46 @@ function renderThinkingGlyphs(elapsed: number, c: AnimColors): string {
 interface EditorContext {
   pi: ExtensionAPI;
   ctx: Record<string, any>;
+  config: InputRevampConfig;
+}
+
+/** Read-only context passed to every element renderer. */
+interface ElementRenderEnv {
+  // colour ANSI codes
+  accentAnsi: string;
+  warningAnsi: string;
+  successAnsi: string;
+  errorAnsi: string;
+  syntaxNumberAnsi: string;
+  syntaxCommentAnsi: string;
+  dimAnsi: string;
+  // theme helpers
+  thm: { fg: (k: string, s: string) => string; getFgAnsi: (k: string) => string };
+  // session data
+  ctx: Record<string, any>;
+  pi: ExtensionAPI;
+  metrics: ReturnType<typeof computeSessionMetrics>;
+  sessionElapsed: number;
+  toolCount: number;
+  tokEstimate: number;
+  turnInfo: { turnNum: number; turnDuration: string } | null;
+  contextUsage: { percent: number | null; tokens: number | null; contextWindow: number | null };
+  lastCompletedTurn: { turnNum: number; cost: number; output: number; cacheRead: number; input: number; duration: string } | null;
+  metricUpdateCount: number;
+  metricsScope: "session" | "turn";
 }
 
 /**
- * Editor that frames itself with a rounded rectangle ╭─╮│╰─╯, with info spread
- * left/right in the top border and a π prompt character on the first content
- * line.
+ * Editor that frames itself with a rounded rectangle ╭─╮│╰─╯, with fully
+ * configurable info elements in all four corners and a π prompt character on
+ * the first content line.
  *
  * The render is built from scratch via layoutText() for full control over the
  * spacing around the π.
  */
 class NerismaInputEditor extends CustomEditor {
   private ext: EditorContext;
+  private config: InputRevampConfig;
   private _thinkingTimer: ReturnType<typeof setInterval> | undefined;
   private _inputTimer: ReturnType<typeof setInterval> | undefined;
   private _wasThinking: boolean = false;
@@ -451,6 +573,13 @@ class NerismaInputEditor extends CustomEditor {
   private _lastTokValue: number = -1;
   /** Metrics update counter (shown in parentheses after T). */
   private _metricUpdateCount: number = 0;
+  /** Previous serialized values per `scope:id` key — used to detect changes for per-element pulse.
+   *  Keyed by scope (not bare ElementId): the same element (e.g. `cost`) appears in both a
+   *  session-scope and a turn-scope quadrant with different values, so a bare id would collide
+   *  and flip every frame. */
+  private _prevElementValues = new Map<string, string>();
+  /** `scope:id` keys currently mid-pulse (decay not finished yet). */
+  private _pulsingElements = new Set<string>();
   /** Cache of the last completed turn (shown while the current turn has no reply yet). */
   private _lastCompletedTurn: {
     turnNum: number;
@@ -467,9 +596,10 @@ class NerismaInputEditor extends CustomEditor {
     keybindings: KeybindingsManager,
     ext: EditorContext,
   ) {
-    // paddingX at 1 keeps a little inner visual comfort
+    // paddingX at 0 keeps full control over spacing
     super(tui, theme, keybindings, { paddingX: 0 });
     this.ext = ext;
+    this.config = ext.config;
   }
 
   dispose() {
@@ -530,6 +660,157 @@ class NerismaInputEditor extends CustomEditor {
     }
   }
 
+  /**
+   * Builds a text fragment for a single element ID, or returns null if the
+   * data is not available.
+   *
+   * @returns the display text, its colour ANSI code, and an optional skipPulse
+   *          flag (for elements that manage their own pulse, like `tok`).
+   */
+  private _renderElement(
+    id: ElementId,
+    env: ElementRenderEnv,
+  ): { text: string; ansi: string; skipPulse?: boolean } | null {
+    const { accentAnsi, warningAnsi, successAnsi, errorAnsi, syntaxNumberAnsi, syntaxCommentAnsi,
+      dimAnsi, thm, ctx, pi, metrics, sessionElapsed, toolCount, tokEstimate,
+      turnInfo, contextUsage, lastCompletedTurn, metricUpdateCount, metricsScope } = env;
+
+    switch (id) {
+      case "agent": {
+        const agent = process.env.PI_ACTIVE_AGENT;
+        if (!agent) return null;
+        return { text: agent, ansi: accentAnsi };
+      }
+      case "model": {
+        const model = ctx.model as { provider?: string; id?: string } | undefined;
+        if (!model?.provider || !model?.id) return null;
+        return { text: `${model.provider}/${model.id}`, ansi: accentAnsi };
+      }
+      case "thinking-level": {
+        try {
+          const level = pi.getThinkingLevel();
+          if (!level || level === "off") return null;
+          return { text: level, ansi: thm.getFgAnsi("syntaxFunction") };
+        } catch {
+          return null;
+        }
+      }
+      case "cwd": {
+        const cwd = ctx.cwd as string | undefined;
+        if (!cwd) return null;
+        return { text: formatCwd(cwd), ansi: thm.getFgAnsi("muted") };
+      }
+      case "duration": {
+        if (sessionElapsed <= 0) return null;
+        return { text: formatDuration(sessionElapsed), ansi: dimAnsi };
+      }
+      case "tools": {
+        return { text: `${toolCount} tools`, ansi: thm.getFgAnsi("muted") };
+      }
+      case "tok": {
+        if (tokEstimate <= 0) return null;
+        const tokStr = `~${tokEstimate} tok`;
+        const tp = this._tokPulse;
+        if (this.config.animations.tokPulse && tp > 0.001) {
+          return { text: lerpToWhite(syntaxCommentAnsi, Math.min(1, tp), tokStr), ansi: "", skipPulse: true };
+        }
+        return { text: tokStr, ansi: syntaxCommentAnsi };
+      }
+      case "session-label": {
+        return { text: "SESSION", ansi: accentAnsi };
+      }
+      case "ctx-percent": {
+        if (contextUsage.percent === null) return null;
+        return { text: `${contextUsage.percent.toFixed(1)}%`, ansi: dimAnsi };
+      }
+      case "ctx-tokens": {
+        if (contextUsage.tokens === null) return null;
+        return { text: formatTokens(contextUsage.tokens), ansi: dimAnsi };
+      }
+      case "ctx-tokens-max": {
+        if (contextUsage.contextWindow === null) return null;
+        return { text: formatTokens(contextUsage.contextWindow), ansi: dimAnsi };
+      }
+      case "ctx-tokens-full": {
+        if (contextUsage.tokens === null || contextUsage.contextWindow === null) return null;
+        return { text: `${formatTokens(contextUsage.tokens)}/${formatTokens(contextUsage.contextWindow)}`, ansi: dimAnsi };
+      }
+      case "cost": {
+        const c = metricsScope === "session" ? (metrics?.cost ?? 0) : (lastCompletedTurn?.cost ?? 0);
+        if (c <= 0) return null;
+        return { text: `${c.toFixed(3)}$`, ansi: warningAnsi };
+      }
+      case "out": {
+        const o = metricsScope === "session" ? (metrics?.output ?? 0) : (lastCompletedTurn?.output ?? 0);
+        if (o <= 0) return null;
+        return { text: `OUT ${formatTokens(o)}`, ansi: syntaxNumberAnsi };
+      }
+      case "hit": {
+        const h = metricsScope === "session" ? (metrics?.cacheRead ?? 0) : (lastCompletedTurn?.cacheRead ?? 0);
+        if (h <= 0) return null;
+        return { text: `HIT ${formatTokens(h)}`, ansi: successAnsi };
+      }
+      case "miss": {
+        const m = metricsScope === "session" ? (metrics?.input ?? 0) : (lastCompletedTurn?.input ?? 0);
+        if (m <= 0) return null;
+        return { text: `MISS ${formatTokens(m)}`, ansi: errorAnsi };
+      }
+      case "turn": {
+        if (!turnInfo || turnInfo.turnNum <= 0) return null;
+        return { text: `T${turnInfo.turnNum} (${metricUpdateCount})`, ansi: accentAnsi };
+      }
+      case "turn-duration": {
+        if (!turnInfo || !turnInfo.turnDuration) return null;
+        return { text: turnInfo.turnDuration, ansi: dimAnsi };
+      }
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Builds a quadrant text from a list of element IDs.
+   */
+  private _buildQuadrant(
+    elementIds: ElementId[],
+    env: ElementRenderEnv,
+    pulsedTextFn: (ansi: string, text: string, curve?: number) => string,
+    separator: string = " · ",
+  ): string {
+    const parts: string[] = [];
+    const sepDim = `${env.dimAnsi}${separator}\x1b[39m`;
+
+    for (const id of elementIds) {
+      const result = this._renderElement(id, env);
+      if (!result) continue;
+
+      if (result.skipPulse) {
+        // Element manages its own pulse (e.g. tok uses _tokPulse)
+        parts.push(result.text);
+      } else {
+        // Qualify by scope so the same id in session/turn quadrants doesn't collide.
+        const pulseKey = `${env.metricsScope}:${id}`;
+        const key = `${result.ansi}|${result.text}`;
+        const prev = this._prevElementValues.get(pulseKey);
+        const changed = prev !== key;
+        this._prevElementValues.set(pulseKey, key);
+        if (changed) {
+          this._pulsingElements.add(pulseKey);
+        }
+        if (this._pulsingElements.has(pulseKey)) {
+          parts.push(pulsedTextFn(result.ansi, result.text));
+          if (this._metricPulse < 0.01) {
+            this._pulsingElements.delete(pulseKey);
+          }
+        } else {
+          parts.push(`${result.ansi}${result.text}\x1b[39m`);
+        }
+      }
+    }
+
+    return parts.join(sepDim);
+  }
+
   render(width: number): string[] {
     const innerWidth = Math.max(2, width - 2);
 
@@ -555,30 +836,15 @@ class NerismaInputEditor extends CustomEditor {
     const syntaxCommentAnsi = thm.getFgAnsi("syntaxComment");
     const dimAnsi = thm.getFgAnsi("dim");
 
-    // Applies lerpToWhite from the original ANSI based on _metricPulse.
-    // When pulse=0: exact original color. When pulse=1: pure white.
-    // Reads this._metricPulse directly (no frozen capture) so the change
-    // detection below updates the value BEFORE pulsedText runs.
-    const pulsedText = (ansi: string, text: string, curve: number = 1) => {
-      const mp = this._metricPulse;
-      const intensity = Math.pow(mp, curve);
-      return intensity > 0.001 ? lerpToWhite(ansi, intensity, text) : `${ansi}${text}\x1b[39m`;
-    };
-
-    const accent = (s: string) => thm.fg("accent", s);
-    const muted = (s: string) => thm.fg("muted", s);
-    const dim = (s: string) => thm.fg("dim", s);
-    const borderAccent = (s: string) => thm.fg("borderAccent", s);
+    const accent = (s: string) => thm.fg("accent", s); // used by borderColorFn fallback
 
     // ── Typing speed → bar whitening (INDEPENDENT of thinking) ──
-    // We sample the characters added over a sliding window → WPM, normalized to
-    // an intensity 0..1 (TYPING_WHITE_WPM ⇒ 1 ⇒ pure white). The sliding window
-    // makes the intensity decay on its own once typing stops.
+    const configAnim = this.config.animations;
     const currentText = this.getText();
     if (currentText !== this._lastInputText) {
       const delta = currentText.length - this._lastInputText.length;
       // Submit detection: non-empty text → empty (message submitted or clear all).
-      if (this._lastInputText !== "" && currentText === "") {
+      if (configAnim.submitFlash && this._lastInputText !== "" && currentText === "") {
         this._submitPulse = 1.0;
         if (!this._submitTimer) {
           this._submitTimer = setInterval(() => {
@@ -597,50 +863,44 @@ class NerismaInputEditor extends CustomEditor {
         this._lastKeyTime = now;
       }
     }
-    this._keyEvents = this._keyEvents.filter((e) => now - e.t < TYPING_WINDOW_MS);
-    const charsInWindow = this._keyEvents.reduce((s, e) => s + e.n, 0);
-    const wpm = (charsInWindow / 5) * (60000 / TYPING_WINDOW_MS); // 1 word = 5 characters
-    const targetIntensity = Math.max(0, Math.min(TYPING_MAX, wpm / TYPING_WHITE_WPM)); // capped > 1 (white headroom)
-    // Attack/release asymmetry:
-    //   - while typing (short idle) → fast rise toward the target.
-    //   - once typing stops (idle > threshold) → clean EXPONENTIAL fall that no
-    //     longer depends on the sliding window (otherwise it stayed white ~800ms).
-    if (now - this._lastKeyTime > TYPING_IDLE_MS) {
-      this._typeIntensity *= TYPING_RELEASE;
+
+    let borderT = 0;
+    if (configAnim.typingPulse) {
+      this._keyEvents = this._keyEvents.filter((e) => now - e.t < TYPING_WINDOW_MS);
+      const charsInWindow = this._keyEvents.reduce((s, e) => s + e.n, 0);
+      const wpm = (charsInWindow / 5) * (60000 / TYPING_WINDOW_MS);
+      const targetIntensity = Math.max(0, Math.min(TYPING_MAX, wpm / TYPING_WHITE_WPM));
+      if (now - this._lastKeyTime > TYPING_IDLE_MS) {
+        this._typeIntensity *= TYPING_RELEASE;
+      } else {
+        this._typeIntensity += (targetIntensity - this._typeIntensity) * TYPING_ATTACK;
+      }
+      if (this._typeIntensity < 0.01) this._typeIntensity = 0;
+
+      const isPulsing = this._typeIntensity > 0 || this._keyEvents.length > 0;
+      if (isPulsing && !this._wasPulsing) {
+        this._startInputAnimation();
+      } else if (!isPulsing && this._wasPulsing) {
+        this._stopInputAnimation();
+        try { this.tui.requestRender(); } catch {}
+      }
+      this._wasPulsing = isPulsing;
+
+      borderT = this._typeIntensity > 0.001
+        ? Math.max(0, Math.min(1, this._typeIntensity + Math.sin(now / 70) * 0.12 * this._typeIntensity))
+        : 0;
     } else {
-      this._typeIntensity += (targetIntensity - this._typeIntensity) * TYPING_ATTACK;
+      this._typeIntensity = 0;
+      this._keyEvents = [];
+      if (this._wasPulsing) {
+        this._stopInputAnimation();
+        this._wasPulsing = false;
+      }
     }
-    if (this._typeIntensity < 0.01) this._typeIntensity = 0;
 
-    // Typing-animation timer: runs as long as there is intensity left to dissipate.
-    const isPulsing = this._typeIntensity > 0 || this._keyEvents.length > 0;
-    if (isPulsing && !this._wasPulsing) {
-      this._startInputAnimation();
-    } else if (!isPulsing && this._wasPulsing) {
-      this._stopInputAnimation();
-      try { this.tui.requestRender(); } catch {}
-    }
-    this._wasPulsing = isPulsing;
-
-    // ── Thinking oscillation: sinusoidal, clean, INDEPENDENT of typing ──
-    // This (and only this) animates the equalizer + the thinking word. The
-    // equalizer has its own rhythm, separate from the typing pulse.
-    const thinkOffset = isThinking ? Math.round(Math.sin(now / 120) * 75) : 0;
-    const thinkColor = (s: string) => shadeFgAnsi(accentAnsi, thinkOffset, s);
-
-    // ── Bar color (border + π) ──
-    // DRIVEN ONLY BY TYPING. Never by thinking: while the model thinks, the
-    // border stays at the fixed accent (the equalizer, on its own line, shows the
-    // activity). Whitening + slight flicker whose amplitude ∝ speed ("shimmers"
-    // when typing fast).
-    const typeT = this._typeIntensity > 0.001
-      ? Math.max(0, Math.min(1, this._typeIntensity + Math.sin(now / 70) * 0.12 * this._typeIntensity))
-      : 0;
-    // Submit pulse: triggers when the user sends a message (detected by the
-    // non-empty text → empty transition). Combined with the typing pulse via
-    // max: submitting produces a brief white flash.
-    const submitT = this._submitPulse;
-    const borderT = Math.max(typeT, submitT);
+    // Submit pulse (only if enabled)
+    const submitT = configAnim.submitFlash ? this._submitPulse : 0;
+    borderT = Math.max(borderT, submitT);
     const borderColorFn = (s: string) => {
       if (borderT > 0.001) return lerpToWhite(accentAnsi, borderT, s);
       return accent(s);
@@ -648,73 +908,96 @@ class NerismaInputEditor extends CustomEditor {
     // The π follows the border color EXACTLY (same function).
     const promptColorFn = borderColorFn;
 
-
-    // ── Session metrics (single computation, shared by 3 parts) ──
+    // ── Session metrics (single computation, shared by all quadrants) ──
     let entries: readonly any[] = [];
     let sessionElapsed = 0;
     let toolCount = 0;
     let tokEstimate = 0;
-    let metrics: ReturnType<typeof computeSessionMetrics> | null = null;
-    let hasTurns = false;
-    let turnCount = 0;
-    // Whether there is at least one assistant reply with metrics (output > 0).
+    let metrics: ReturnType<typeof computeSessionMetrics> = null;
     let hasAssistantResponse = false;
+    let turnCount = 0;
+    let sessionInfo: ReturnType<typeof computeSessionInfo> | null = null;
+    let contextUsage: { percent: number | null; tokens: number | null; contextWindow: number | null } = {
+      percent: null, tokens: null, contextWindow: null,
+    };
 
     try {
       entries = ctx.sessionManager?.getEntries?.() ?? [];
       metrics = computeSessionMetrics(entries);
       const info = computeSessionInfo(entries);
-      hasTurns = info.turnCount > 0;
-      turnCount = info.turnCount;
+      sessionInfo = info;
       hasAssistantResponse = metrics !== null && metrics.output > 0;
+      turnCount = info.turnCount;
       sessionElapsed = info.sessionStartTs ? Math.round((Date.now() - info.sessionStartTs) / 1000) : 0;
       const wireTools = effectiveToolNames(pi);
       toolCount = wireTools.length;
       tokEstimate = estimateTokens(this.getText());
+      const usage = ctx.getContextUsage();
+      if (usage) {
+        contextUsage = {
+          percent: usage.percent ?? null,
+          tokens: usage.tokens ?? null,
+          contextWindow: usage.contextWindow ?? null,
+        };
+      }
     } catch {}
 
     // Metrics change detection → pulse toward white.
-    if (hasAssistantResponse) {
+    if (configAnim.metricPulse && hasAssistantResponse) {
       const sig = `${turnCount}|${metrics!.cost}|${metrics!.output}`;
       if (sig !== this._lastMetricsSig) {
         this._lastMetricsSig = sig;
         this._metricUpdateCount++;
-        this._metricPulse = 1.0; // (re)trigger from the current color, not the base
+        this._metricPulse = 1.0;
         if (!this._metricTimer) {
           this._metricTimer = setInterval(() => {
             this._metricPulse *= METRIC_RELEASE;
             if (this._metricPulse < 0.01) {
               this._metricPulse = 0;
+              this._pulsingElements.clear();
               this._stopMetricAnimation();
             }
             try { this.tui.requestRender(); } catch {}
           }, 16);
         }
       }
+    } else if (!configAnim.metricPulse) {
+      this._metricPulse = 0;
+      this._pulsingElements.clear();
     }
 
-    // ── Left part: agent · model · thinking · cwd · duration · tools · ~tok ──
-    const leftParts: string[] = [];
+    // ── Last turn tracking ──────────────────────────────
+    const lastTurn = computeLastTurnMetrics(entries);
+    if (hasAssistantResponse && lastTurn && sessionInfo) {
+      const turnDuration = (() => {
+        const luts = sessionInfo.lastPromptTs;
+        if (!luts) return "";
+        for (let i = entries.length - 1; i >= 0; i--) {
+          const e = entries[i];
+          if (e.type === "message" && e.message?.role === "assistant") {
+            const ts = new Date(e.timestamp).getTime();
+            if (!isNaN(ts)) return formatDuration(Math.round((ts - luts) / 1000));
+          }
+        }
+        return "";
+      })();
+      this._lastCompletedTurn = {
+        turnNum: turnCount > 0 ? turnCount : 0,
+        cost: lastTurn.cost,
+        output: lastTurn.output,
+        cacheRead: lastTurn.cacheRead,
+        input: lastTurn.input,
+        duration: turnDuration,
+      };
+    }
 
-    const activeAgent = process.env.PI_ACTIVE_AGENT;
-    if (activeAgent) leftParts.push(borderAccent(activeAgent));
+    const displayTurn = this._lastCompletedTurn;
+    const turnInfo = displayTurn
+      ? { turnNum: displayTurn.turnNum, turnDuration: displayTurn.duration }
+      : null;
 
-    const model = ctx.model;
-    if (model) leftParts.push(thm.fg("accent", `${model.provider}/${model.id}`));
-
-    try {
-      const level = pi.getThinkingLevel();
-      if (level && level !== "off") leftParts.push(thm.fg("syntaxFunction", level));
-    } catch {}
-
-    if (ctx.cwd) leftParts.push(muted(formatCwd(ctx.cwd)));
-
-    // Session info: duration · tools · ~tok
-    leftParts.push(thm.fg("dim", formatDuration(sessionElapsed)));
-    leftParts.push(muted(`${toolCount} tools`));
-
-    // Pulse ~X tok when it updates (every ~4 characters typed).
-    if (tokEstimate > 0) {
+    // Pulse ~X tok when it updates (only if enabled).
+    if (configAnim.tokPulse && tokEstimate > 0) {
       if (tokEstimate !== this._lastTokValue) {
         this._lastTokValue = tokEstimate;
         this._tokPulse = 1.0;
@@ -729,72 +1012,31 @@ class NerismaInputEditor extends CustomEditor {
           }, 16);
         }
       }
-      const tokStr = `~${tokEstimate} tok`;
-      const tp = this._tokPulse;
-      leftParts.push(tp > 0.001
-        ? lerpToWhite(syntaxCommentAnsi, tp, tokStr)
-        : `${syntaxCommentAnsi}${tokStr}\x1b[39m`);
-    } else {
-      this._lastTokValue = -1;
+    } else if (!configAnim.tokPulse) {
+      this._tokPulse = 0;
     }
 
-    // ── Right part: session label · cost · OUT · HIT · MISS ──
-    let rightText = "";
-    // `hasAssistantResponse` already implies `metrics !== null` (see computation
-    // above); we spell it out here so TS narrows `metrics` inside the block.
-    if (hasAssistantResponse && metrics) {
-      try {
-        const rightParts: string[] = [];
-
-        // Session label — accent · percentage of context used.
-        rightParts.push(pulsedText(accentAnsi, "SESSION"));
-        try {
-          const usage = ctx.getContextUsage();
-          if (usage && usage.percent !== null && usage.tokens !== null) {
-            rightParts.push(pulsedText(dimAnsi,
-              `${usage.percent.toFixed(1)}% (${formatTokens(usage.tokens)}/${formatTokens(usage.contextWindow)})`, 2));
-          } else if (usage && usage.percent !== null) {
-            rightParts.push(pulsedText(dimAnsi, `${usage.percent.toFixed(1)}%`, 2));
-          }
-        } catch {}
-
-        // Session cost — warning (3 decimals).
-        if (metrics.cost > 0)
-          rightParts.push(pulsedText(warningAnsi, `${metrics.cost.toFixed(3)}$`));
-
-        if (metrics.output > 0)
-          rightParts.push(pulsedText(syntaxNumberAnsi, `OUT ${formatTokens(metrics.output)}`));
-
-        const hasCacheHit = metrics.cacheRead > 0;
-        const hasCacheMiss = metrics.input > 0;
-        if (hasCacheHit || hasCacheMiss) {
-          const cacheParts: string[] = [];
-          if (hasCacheHit) cacheParts.push(pulsedText(successAnsi, `HIT ${formatTokens(metrics.cacheRead)}`));
-          if (hasCacheMiss) cacheParts.push(pulsedText(errorAnsi, `MISS ${formatTokens(metrics.input)}`));
-          rightParts.push(cacheParts.join(` ${dim("·")} `));
-        }
-
-        if (rightParts.length > 0)
-          rightText = ` ${rightParts.join(` ${dim("·")} `)} `;
-      } catch {}
-    }
-
-    // ── Assembly ────────────────────────────────────────
-    const leftText = leftParts.length > 0 ? ` ${leftParts.join(` ${dim("·")} `)} ` : "";
-
-    // ── Build the final render ──────────────────────────
-    const result: string[] = [];
+    // ── PulsedText wrapper for metric pulse ─────────────────
+    // Applied per-element in _buildQuadrant only when the value just changed.
+    const pulsedTextFinal = (ansi: string, text: string, curve: number = 1) => {
+      const mp = configAnim.metricPulse ? this._metricPulse : 0;
+      const intensity = Math.pow(mp, curve);
+      return intensity > 0.001 ? lerpToWhite(ansi, intensity, text) : `${ansi}${text}\x1b[39m`;
+    };
 
     // ── Thinking animation line ───────────────────────────
+    const result: string[] = [];
+
     if (isThinking) {
       const elapsed = Date.now() - this._animStart;
-      // Pick the expression based on context.
       let expression: string;
       if (activeToolName) {
         expression = DEFAULT_TOOL_EXPRESSION;
       } else {
         expression = THINKING_EXPRESSIONS[Math.abs(Math.floor(elapsed / 2000)) % THINKING_EXPRESSIONS.length];
       }
+      const thinkOffset = Math.round(Math.sin(now / 120) * 75);
+      const thinkColor = (s: string) => shadeFgAnsi(accentAnsi, thinkOffset, s);
       const wordStr = ` ${thinkColor(expression)}`;
       const glyphs = renderThinkingGlyphs(elapsed, {
         shade: (s, amount) => shadeFgAnsi(accentAnsi, amount, s),
@@ -807,22 +1049,36 @@ class NerismaInputEditor extends CustomEditor {
       result.push("");
     }
 
+    // ── Build quadrant texts ────────────────────────────
+    const layout = this.config.layout;
+    const sep = " · ";
+    const env: ElementRenderEnv = {
+      accentAnsi, warningAnsi, successAnsi, errorAnsi,
+      syntaxNumberAnsi, syntaxCommentAnsi, dimAnsi, thm,
+      ctx, pi, metrics, sessionElapsed, toolCount, tokEstimate,
+      turnInfo, contextUsage, lastCompletedTurn: this._lastCompletedTurn,
+      metricUpdateCount: this._metricUpdateCount,
+      metricsScope: "session",
+    };
+
+    // Top border
+    const topLeftText = this._buildQuadrant(layout.topLeft, env, pulsedTextFinal, sep);
+    const topRightText = this._buildQuadrant(layout.topRight, env, pulsedTextFinal, sep);
+
+    const leftStr = topLeftText.length > 0 ? ` ${topLeftText} ` : "";
+    const rightStr = topRightText.length > 0 ? ` ${topRightText} ` : "";
+
     // Top line: ╭─...─╮
-    result.push(fitRoundedBorder(leftText, rightText, width, borderColorFn, true));
+    result.push(fitRoundedBorder(leftStr, rightStr, width, borderColorFn, true));
 
     // ── Content: word-wrapping via layoutText() ─────────
-    // We reserve `π ` at the start of the first line.
     const promptChar = promptColorFn("π");
     const promptPrefix = ` ${promptChar} `;
     const promptWidth = visibleWidth(promptPrefix);
     const layoutWidth = Math.max(1, innerWidth - promptWidth);
     (this as any).lastWidth = layoutWidth;
 
-    // Use Editor's inherited layoutText() for word-wrapping
-    // (preserves paste markers, segmentation, etc.).
     const layoutLines = (this as any).layoutText(layoutWidth);
-
-    // Max width available for the text (excluding the │ borders and π prefix).
     const maxTextWidth = innerWidth - promptWidth;
 
     for (let i = 0; i < layoutLines.length; i++) {
@@ -830,39 +1086,31 @@ class NerismaInputEditor extends CustomEditor {
       let displayText = ll.text;
       let lineWidth = visibleWidth(ll.text);
 
-      // Add the cursor if this line carries it.
       if (ll.hasCursor && ll.cursorPos !== undefined) {
         const before = displayText.slice(0, ll.cursorPos);
         const after = displayText.slice(ll.cursorPos);
 
         if (after.length > 0) {
-          // Cursor on a character — invert it.
           const segs = [...(this as any).segment(after, "grapheme")];
           const firstG = segs[0]?.segment || "";
           const rest = after.slice(firstG.length);
           displayText = before + `\x1b[7m${firstG}\x1b[0m` + rest;
-          // lineWidth unchanged (replacement, not addition)
         } else {
-          // Cursor at end of line — inverted space.
           displayText = before + "\x1b[7m \x1b[0m";
           lineWidth += 1;
         }
       }
 
-      // Safety truncation: the assembled line must not exceed width.
       if (lineWidth > maxTextWidth) {
         displayText = truncateToWidth(displayText, maxTextWidth);
         lineWidth = maxTextWidth;
       }
 
       if (i === 0) {
-        // First line: prefix with " π ".
         const finalWidth = promptWidth + lineWidth;
         const padding = Math.max(0, innerWidth - finalWidth);
         result.push(borderColorFn("│") + promptPrefix + displayText + " ".repeat(padding) + borderColorFn("│"));
       } else {
-        // Wrapped / multi-line lines: indented by promptWidth to align the text
-        // under the first line's text (after " π ").
         const indent = " ".repeat(promptWidth);
         const finalWidth = promptWidth + lineWidth;
         const padding = Math.max(0, innerWidth - finalWidth);
@@ -871,8 +1119,6 @@ class NerismaInputEditor extends CustomEditor {
     }
 
     // ── Autocomplete (slash commands, @mentions, etc.) ───
-    // Rendering inherited from the parent Editor, inserted between the content
-    // and the frame's bottom border.
     if ((this as any).autocompleteState && (this as any).autocompleteList) {
       const autoLines = (this as any).autocompleteList.render(innerWidth);
       for (const line of autoLines) {
@@ -887,76 +1133,18 @@ class NerismaInputEditor extends CustomEditor {
       }
     }
 
-    // ── Bottom-right corner: turn · cost · OUT · HIT · MISS for the last turn ──
-    // Shows the last COMPLETED turn (with an assistant reply). While the current
-    // turn has no reply, the previous turn's display is kept.
-    let bottomRightText = "";
-    if (hasAssistantResponse) try {
-      const info = computeSessionInfo(entries);
-      const bottomParts: string[] = [];
+    // ── Bottom quadrants ────────────────────────────────
+    const bottomEnv: ElementRenderEnv = { ...env, metricsScope: "turn" };
+    const bottomLeftText = this._buildQuadrant(layout.bottomLeft, bottomEnv, pulsedTextFinal, sep);
+    const bottomRightText = this._buildQuadrant(layout.bottomRight, bottomEnv, pulsedTextFinal, sep);
 
-      // Last-turn metrics (same order as the session: cost · OUT · HIT · MISS).
-      const lastTurn = computeLastTurnMetrics(entries);
-
-      // Decide which turn to show: the current turn if it has metrics, otherwise
-      // the last completed turn (cache).
-      if (lastTurn) {
-        // Current turn completed → update the cache.
-        const turnNum = info.turnCount > 0 ? info.turnCount : 0;
-        const duration = (() => {
-          const luts = info.lastPromptTs;
-          if (!luts) return "";
-          for (let i = entries.length - 1; i >= 0; i--) {
-            const e = entries[i];
-            if (e.type === "message" && e.message?.role === "assistant") {
-              const ts = new Date(e.timestamp).getTime();
-              if (!isNaN(ts)) return formatDuration(Math.round((ts - luts) / 1000));
-            }
-          }
-          return "";
-        })();
-        this._lastCompletedTurn = {
-          turnNum,
-          cost: lastTurn.cost,
-          output: lastTurn.output,
-          cacheRead: lastTurn.cacheRead,
-          input: lastTurn.input,
-          duration,
-        };
-      }
-
-      // Use the cache (most recent completed turn) for the display.
-      const display = this._lastCompletedTurn;
-      if (display) {
-        bottomParts.push(pulsedText(accentAnsi, `T${display.turnNum} (${this._metricUpdateCount})`));
-
-        if (display.duration)
-          bottomParts.push(pulsedText(dimAnsi, display.duration, 2));
-
-        if (display.cost > 0)
-          bottomParts.push(pulsedText(warningAnsi, `${display.cost.toFixed(3)}$`));
-
-        if (display.output > 0)
-          bottomParts.push(pulsedText(syntaxNumberAnsi, `OUT ${formatTokens(display.output)}`));
-
-        const hasCacheHit = display.cacheRead > 0;
-        const hasCacheMiss = display.input > 0;
-        if (hasCacheHit || hasCacheMiss) {
-          const cacheParts: string[] = [];
-          if (hasCacheHit) cacheParts.push(pulsedText(successAnsi, `HIT ${formatTokens(display.cacheRead)}`));
-          if (hasCacheMiss) cacheParts.push(pulsedText(errorAnsi, `MISS ${formatTokens(display.input)}`));
-          bottomParts.push(cacheParts.join(` ${dim("·")} `));
-        }
-      }
-
-      if (bottomParts.length > 0)
-        bottomRightText = ` ${bottomParts.join(` ${dim("·")} `)} `;
-    } catch {
-      // ignore
-    }
+    const bottomLeftStr = bottomLeftText.length > 0 ? ` ${bottomLeftText} ` : "";
+    const bottomRightStr = bottomRightText.length > 0 ? ` ${bottomRightText} ` : "";
 
     // Bottom line: ╰─...─╯
-    result.push(fitRoundedBorder("", bottomRightText, width, borderColorFn, false));
+    // fitRoundedBorder puts left on the left and right on the right.
+    // The bottom-left text goes to the left side of the bottom border.
+    result.push(fitRoundedBorder(bottomLeftStr, bottomRightStr, width, borderColorFn, false));
 
     return result;
   }
@@ -966,10 +1154,10 @@ class NerismaInputEditor extends CustomEditor {
 
 export default function (pi: ExtensionAPI): void {
   let registered = false;
+  const config = loadConfig();
 
   // Capture (by reference) the tools array packed into each provider request,
-  // so the UI can report exactly what was sent. Read-only: returning nothing
-  // leaves the payload unchanged.
+  // so the UI can report exactly what was sent.
   pi.on("before_provider_request", (event) => {
     lastWirePayloadTools = findToolsArray(event.payload);
   });
@@ -987,7 +1175,7 @@ export default function (pi: ExtensionAPI): void {
     }));
 
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      return new NerismaInputEditor(tui, theme, keybindings, { pi, ctx });
+      return new NerismaInputEditor(tui, theme, keybindings, { pi, ctx, config });
     });
   });
 

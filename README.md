@@ -5,17 +5,18 @@ colored **π** prompt character, and a **session metrics bar** built into the
 border.
 
 ```
-┌─ agent · anthropic/claude-sonnet-4-5 · high ───── 0.015$ · 15.2K (2.1K|8.3K) · 12.3% ──╮
-│ π hello world                                                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ agent · anthropic/claude-sonnet-4-5 · high ──── 0.015$ · 15.2K/200K · 12.3% ─╮
+│ π hello world                                                                 │
+╰──────────────────────────────────────── T5 (3) · 12s · 0.004$ · OUT 8.3K ─────╯
 ```
 
 ![pi-input-revamp preview](./preview.gif)
 
-The border and the π use the active theme's `accent` color. The top bar shows
-the agent, model, thinking level, working directory, session duration, tool
-count and a live token estimate; the right side shows the session label, context
-usage, cost and token totals.
+The border and the π use the active theme's `accent` color. Each of the four
+corners of the border is a **quadrant** you fill with the info elements you want
+— agent, model, cost, context usage, per-turn metrics, and more. By default the
+top bar shows session-wide info and the bottom-right shows the last turn, but the
+whole layout is configurable (see [Configuration](#configuration)).
 
 ## Installation
 
@@ -30,6 +31,75 @@ Or via `settings.json`:
   "packages": ["npm:@nerisma/pi-input-revamp"]
 }
 ```
+
+## Configuration
+
+The layout and animations are driven by `~/.pi/pi-input-revamp.json`. The file is
+created with the defaults on first run, so you can just edit it. Missing fields
+fall back to the defaults, and changes are picked up on the next pi restart.
+
+```json
+{
+  "layout": {
+    "topLeft": ["agent", "model", "thinking-level", "cwd", "duration", "tools", "tok"],
+    "topRight": ["session-label", "ctx-percent", "ctx-tokens-full", "cost", "out", "hit", "miss"],
+    "bottomLeft": [],
+    "bottomRight": ["turn", "turn-duration", "cost", "out", "hit", "miss"]
+  },
+  "animations": {
+    "typingPulse": true,
+    "submitFlash": true,
+    "metricPulse": true,
+    "tokPulse": true
+  }
+}
+```
+
+### Layout
+
+Each quadrant — `topLeft`, `topRight`, `bottomLeft`, `bottomRight` — is an ordered
+list of element IDs joined with ` · `. Elements that have no data (e.g. a model
+that isn't set, or a turn that hasn't completed) are skipped silently, so empty
+quadrants simply collapse into the border.
+
+| Element            | Shows                                                              |
+| ------------------ | ----------------------------------------------------------------- |
+| `agent`            | Active agent name (`PI_ACTIVE_AGENT`)                             |
+| `model`            | `provider/id` of the current model                                |
+| `thinking-level`   | Thinking level (hidden when `off`)                                |
+| `cwd`              | Working directory (`$HOME` collapsed to `~`)                      |
+| `duration`         | Elapsed session time (`5m 12s`)                                    |
+| `tools`            | Number of tools actually sent on the last request (`12 tools`)    |
+| `tok`              | Live token estimate of the text you're typing (`~42 tok`)         |
+| `session-label`    | The literal `SESSION` tag                                          |
+| `ctx-percent`      | Context window usage as a percentage (`12.3%`)                    |
+| `ctx-tokens`       | Context tokens in use (`15.2K`)                                    |
+| `ctx-tokens-max`   | Context window size (`200K`)                                       |
+| `ctx-tokens-full`  | Used / max (`15.2K/200K`)                                          |
+| `cost`             | Cost in `$`                                                        |
+| `out`              | Output tokens (`OUT 8.3K`)                                         |
+| `hit`              | Cache-read tokens (`HIT 2.1K`)                                     |
+| `miss`             | Input / cache-miss tokens (`MISS 1.2K`)                            |
+| `turn`             | Turn number with metric-update count (`T5 (3)`)                   |
+| `turn-duration`    | Duration of the last completed turn (`12s`)                       |
+
+**Scope.** `cost`, `out`, `hit` and `miss` are scope-aware: in the **top**
+quadrants they report the whole-session totals, while in the **bottom** quadrants
+they report the **last completed turn** only. This lets you keep a running
+session total up top and a per-turn breakdown below.
+
+### Animations
+
+Each effect can be toggled independently under `animations`:
+
+| Key           | Effect                                                                |
+| ------------- | --------------------------------------------------------------------- |
+| `typingPulse` | Border and π lerp toward white the faster you type                    |
+| `submitFlash` | Brief white border pulse when you submit (text goes non-empty → empty) |
+| `metricPulse` | Metric text pulses toward white when its value changes                |
+| `tokPulse`    | The `~N tok` counter pulses each time the estimate updates            |
+
+The thinking equalizer (the `▁▂▃…█` bar shown while the model works) is always on.
 
 ## How it works
 
