@@ -20,17 +20,24 @@
  *     },
  *     "animations": { "typingPulse": true, ... }
  *   }
+ *
+ * Any slot of the form "ext:<statusKey>" surfaces a status published by another
+ * extension via ctx.ui.setStatus(<statusKey>, …). Drop it into whatever quadrant
+ * you want (position is implied by the quadrant). When that extension has no
+ * status set, the slot shows the key name in the warning colour as a placeholder.
+ *
+ *       "bottomRight": ["turn", "ext:pi-quotas-usage", "turn-cost"]
  */
 
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import type { KeybindingsManager, ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 // ── Configuration types ──────────────────────────────────
 
-type ElementId =
+type BuiltinElementId =
   | "agent" | "model" | "thinking-level" | "cwd"
   | "duration" | "tools" | "tok"
   | "session-label"
@@ -38,6 +45,14 @@ type ElementId =
   | "session-cost" | "session-out" | "session-hit" | "session-miss"
   | "turn-cost" | "turn-out" | "turn-hit" | "turn-miss"
   | "turn" | "turn-duration";
+
+/**
+ * A layout slot is either a built-in element or an extension-status slot of the
+ * form `ext:<statusKey>`, which surfaces whatever a third-party extension has
+ * published via `ctx.ui.setStatus(<statusKey>, …)`. Position is implied by the
+ * quadrant the slot is placed in; no extra declaration is needed.
+ */
+type ElementId = BuiltinElementId | `ext:${string}`;
 
 interface InputRevampConfig {
   layout: {
@@ -206,6 +221,14 @@ const THINKING_EXPRESSIONS = [
 
 /** Last tool currently executing (read by the editor). */
 let activeToolName: string | null = null;
+
+/**
+ * Read-only view of the footer data, captured from the (otherwise hidden) footer
+ * factory. The only channel through which extension statuses set via
+ * `ctx.ui.setStatus()` are exposed to extension code. Read lazily at render time
+ * by the `ext:<key>` slots.
+ */
+let footerDataRef: ReadonlyFooterDataProvider | null = null;
 
 // ── Typing-animation settings (whitening ∝ speed) ──────────
 /** WPM at which the bar turns fully white. */
@@ -569,6 +592,11 @@ class NerismaInputEditor extends CustomEditor {
   private _tokPulse: number = 0;
   /** ~tok pulse decay timer. */
   private _tokTimer: ReturnType<typeof setInterval> | undefined;
+  /** Polls extension statuses (setStatus) and re-renders on change. Only runs
+   *  when the layout actually references at least one `ext:<key>` slot. */
+  private _statusTimer: ReturnType<typeof setInterval> | undefined;
+  /** Serialized signature of the last seen extension statuses (change detection). */
+  private _lastStatusSig: string = "";
   /** Last tokEstimate value for change detection. */
   private _lastTokValue: number = -1;
   /** Metrics update counter (shown in parentheses after T). */
@@ -599,6 +627,15 @@ class NerismaInputEditor extends CustomEditor {
     super(tui, theme, keybindings, { paddingX: 0 });
     this.ext = ext;
     this.config = ext.config;
+
+    // Extension statuses change outside any typing/thinking activity, so the
+    // existing animation timers can't surface them. Poll them on a slow cadence
+    // (matches the ~60s refresh rhythm of quota-style extensions) — but only if
+    // the layout actually uses an `ext:` slot, otherwise stay fully idle.
+    const l = this.config.layout;
+    const usesExtSlots = [...l.topLeft, ...l.topRight, ...l.bottomLeft, ...l.bottomRight]
+      .some((id) => typeof id === "string" && id.startsWith("ext:"));
+    if (usesExtSlots) this._startStatusPolling();
   }
 
   dispose() {
@@ -607,6 +644,35 @@ class NerismaInputEditor extends CustomEditor {
     this._stopMetricAnimation();
     this._stopSubmitAnimation();
     this._stopTokAnimation();
+    this._stopStatusPolling();
+  }
+
+  /** Snapshot of the extension statuses, stable-sorted, for change detection. */
+  private _statusSignature(): string {
+    const m = footerDataRef?.getExtensionStatuses();
+    if (!m || m.size === 0) return "";
+    return [...m.entries()]
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\x00");
+  }
+
+  private _startStatusPolling() {
+    if (this._statusTimer) return;
+    this._statusTimer = setInterval(() => {
+      const sig = this._statusSignature();
+      if (sig !== this._lastStatusSig) {
+        this._lastStatusSig = sig;
+        try { this.tui.requestRender(); } catch { /* editor may be detached */ }
+      }
+    }, 1000);
+  }
+
+  private _stopStatusPolling() {
+    if (this._statusTimer) {
+      clearInterval(this._statusTimer);
+      this._statusTimer = undefined;
+    }
   }
 
   private _startThinkingAnimation() {
@@ -673,6 +739,20 @@ class NerismaInputEditor extends CustomEditor {
     const { accentAnsi, warningAnsi, successAnsi, errorAnsi, syntaxNumberAnsi, syntaxCommentAnsi,
       dimAnsi, thm, ctx, pi, metrics, sessionElapsed, toolCount, tokEstimate,
       turnInfo, contextUsage, lastCompletedTurn, metricUpdateCount } = env;
+
+    // Extension-status slot: surface whatever a third-party extension published
+    // via ctx.ui.setStatus(<key>, …). The published value is already styled by
+    // its owner (it may embed its own ANSI), so we pass it through untouched and
+    // skip our pulse machinery. When no status is set, show the key name in the
+    // warning colour as a placeholder rather than hiding the slot.
+    if (id.startsWith("ext:")) {
+      const key = id.slice(4);
+      const text = footerDataRef?.getExtensionStatuses().get(key);
+      if (text && text.trim().length > 0) {
+        return { text, ansi: "", skipPulse: true };
+      }
+      return { text: `${warningAnsi}${key}\x1b[39m`, ansi: "", skipPulse: true };
+    }
 
     switch (id) {
       case "agent": {
@@ -1185,11 +1265,16 @@ export default function (pi: ExtensionAPI): void {
 
     ctx.ui.setWorkingVisible(false);
 
-    // Footer fully hidden.
-    ctx.ui.setFooter(() => ({
-      render() { return []; },
-      invalidate() {},
-    }));
+    // Footer fully hidden — but we capture its data provider, the only channel
+    // exposing extension statuses (setStatus) to extension code. The `ext:<key>`
+    // layout slots read it lazily at render time.
+    ctx.ui.setFooter((_tui, _theme, footerData) => {
+      footerDataRef = footerData;
+      return {
+        render() { return []; },
+        invalidate() {},
+      };
+    });
 
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
       return new NerismaInputEditor(tui, theme, keybindings, { pi, ctx, config });

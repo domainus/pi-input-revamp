@@ -91,6 +91,34 @@ Every element is self-contained: the `session-*` variants always report
 whole-session totals and the `turn-*` variants always report the last completed
 turn, regardless of which quadrant you place them in.
 
+### Showing another extension in the bar
+
+Extensions can publish a status line through pi's `ctx.ui.setStatus(key, text)`
+API. Normally that text is rendered by pi's footer — which this extension hides —
+so those statuses would be invisible. To surface one, add a slot of the form
+`ext:<statusKey>` to any quadrant:
+
+```json
+{
+  "layout": {
+    "bottomRight": ["turn", "ext:pi-quotas-usage", "turn-cost"]
+  }
+}
+```
+
+- `<statusKey>` is the exact key the other extension passes to `setStatus()` —
+  it must match character for character. Check that extension's docs to find it.
+- Placement and ordering work like any other element: the quadrant decides where
+  it shows, and it's joined with the same ` · ` separator.
+- The published text is shown as-is (extensions usually colour their own status),
+  with no prefix added.
+- When that extension currently has no status set, the slot shows the key name in
+  the warning colour as a placeholder, so you can tell the slot is wired up and
+  waiting for data rather than silently empty.
+
+You can wire up as many as you like, in any corner — nothing needs to be declared
+beyond the `ext:<statusKey>` entry itself.
+
 ### Animations
 
 Each effect can be toggled independently under `animations`:
