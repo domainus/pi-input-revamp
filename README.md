@@ -48,6 +48,7 @@ fall back to the defaults, and changes are picked up on the next pi restart.
   },
   "visibility": {},
   "animations": {
+    "engine": "legacy",
     "typingPulse": true,
     "submitFlash": true,
     "metricPulse": true,
@@ -130,8 +131,11 @@ beyond the `ext:<statusKey>` entry itself.
 
 Each effect can be toggled independently under `animations`:
 
+`engine` is `legacy` by default and keeps the restored renderer byte-compatible. Set it to `compiled-v2` to opt into the precompiled animation catalog and deadline-based scheduler; `/input-settings` switches this safely at runtime. Compiled-v2 compiles complete ANSI frames once per animation, width, theme, label, and state key, centers stable geometry, merges adjacent duplicate phases, and uses a one-line fallback below 24 columns. Session metrics are recomputed only when the lifecycle snapshot changes, not on each animation render. To protect input latency, compiled-v2 deliberately disables the legacy editor-border typing, submit, metric, token, and dynamic-workflow pulses; extension-status slots continue their slow correctness refresh. Roll back to `legacy` at any time to restore those effects.
+
 | Key           | Effect                                                                |
 | ------------- | --------------------------------------------------------------------- |
+| `engine`      | `legacy` (default) or opt-in `compiled-v2` animation engine          |
 | `typingPulse` | Border and π lerp toward white the faster you type                    |
 | `submitFlash` | Brief white border pulse when you submit (text goes non-empty → empty) |
 | `metricPulse` | Metric text pulses toward white when its value changes                |
@@ -164,10 +168,7 @@ and each line is padded to the inner width and wrapped in border characters. The
 top and bottom borders are produced by `fitRoundedBorder`, which fits a left and
 a right text into one line, truncating them when space runs short.
 
-**Session metrics.** On each render it reads the session entries from
-`ctx.sessionManager.getEntries()` and aggregates token usage and cost (whole
-session, and the current/last turn separately). Context usage comes from
-`ctx.getContextUsage()`.
+**Session metrics.** Legacy mode reads session entries on each render. Compiled-v2 hydrates entries at session start and final agent completion, then caches the derived token/cost/turn statistics by snapshot version so animation renders perform no history scan. Context usage comes from `ctx.getContextUsage()`.
 
 **Tool count.** The extension subscribes to `before_provider_request` and keeps
 a reference to the `tools` array packed into the request payload. The count is
@@ -193,9 +194,9 @@ terminals:
   status word animate on their own line, driven by an independent sinusoid so
   the border stays at the fixed accent.
 
-Animations run on short `setInterval` timers that request a re-render and stop
-themselves once the effect has fully decayed; all timers are cleared in
-`dispose()`.
+The legacy renderer retains its existing timer behavior for rollback compatibility. Compiled-v2 uses one monotonic, absolute-deadline `setTimeout` per active widget, requests renders only when the cached frame changes, and clears it generation-safely in `dispose()`.
+
+Run `npm run benchmark` (or `npm run benchmark:animation`) from a source checkout to run the renderer microbenchmark. It compares direct legacy glyph generation with warmed compiled-frame reads and reports compilation separately; it does **not** measure total Pi TUI throughput. Deterministic tests separately enforce bounded frames, scheduler cleanup, and version-cached session scans.
 
 ## Compatibility
 

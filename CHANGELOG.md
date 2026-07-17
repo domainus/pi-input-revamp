@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in `animations.engine: "compiled-v2"` animation engine with declarative bounded frames, shared preview compiler, centered geometry, compact narrow-terminal fallback, and one deadline-based scheduler. `legacy` remains the default rollback path.
 - Selectable working animations: `wave`, `orbit`, `scanner`, `bounce`,
   `sparkle`, `fairy`, `triforce`, `speedster`, `invader`, `aura`, `ninja`,
   `flame`, `mecha`, and `slime`.

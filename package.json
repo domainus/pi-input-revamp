@@ -22,7 +22,9 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "benchmark": "npm run benchmark:animation",
+    "benchmark:animation": "node scripts/benchmark-animation.ts"
   },
   "pi": {
     "extensions": [

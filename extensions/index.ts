@@ -34,6 +34,23 @@ import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { Container, type SettingItem, SettingsList, type SettingsListTheme, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  COMPILED_ANIMATION_IDS,
+  CompiledAnimationEngine,
+  CompiledAnimationScheduler,
+  AnimationSnapshotCache,
+  compileAnimationFrames,
+  type CompiledAnimationId,
+} from "./animation-engine.ts";
+export {
+  AnimationCompiler,
+  AnimationSnapshotCache,
+  CompiledAnimationEngine,
+  CompiledAnimationScheduler,
+  COMPILED_ANIMATION_IDS,
+  compileAnimation,
+  compileAnimationFrames,
+} from "./animation-engine.ts";
 
 // ── Configuration types ──────────────────────────────────
 
@@ -71,6 +88,8 @@ export interface InputRevampConfig {
   /** Element visibility is deliberately separate from layout order. */
   visibility: Record<string, boolean>;
   animations: {
+    /** Legacy remains the byte-compatible default; compiled-v2 is opt-in. */
+    engine: "legacy" | "compiled-v2";
     typingPulse: boolean;
     submitFlash: boolean;
     metricPulse: boolean;
@@ -90,6 +109,7 @@ const DEFAULT_CONFIG: InputRevampConfig = {
   },
   visibility: {},
   animations: {
+    engine: "legacy",
     typingPulse: true,
     submitFlash: true,
     metricPulse: true,
@@ -108,6 +128,10 @@ function isWorkingAnimationChoice(value: unknown): value is WorkingAnimationChoi
 
 function isBoolean(value: unknown): value is boolean {
   return typeof value === "boolean";
+}
+
+function isAnimationEngine(value: unknown): value is InputRevampConfig["animations"]["engine"] {
+  return value === "legacy" || value === "compiled-v2";
 }
 
 /** Merge untrusted on-disk JSON with safe defaults without losing layout order. */
@@ -134,6 +158,7 @@ export function mergeInputRevampConfig(parsed: unknown): InputRevampConfig {
     },
     visibility,
     animations: {
+      engine: isAnimationEngine(sourceAnimations.engine) ? sourceAnimations.engine : DEFAULT_CONFIG.animations.engine,
       typingPulse: isBoolean(sourceAnimations.typingPulse) ? sourceAnimations.typingPulse : DEFAULT_CONFIG.animations.typingPulse,
       submitFlash: isBoolean(sourceAnimations.submitFlash) ? sourceAnimations.submitFlash : DEFAULT_CONFIG.animations.submitFlash,
       metricPulse: isBoolean(sourceAnimations.metricPulse) ? sourceAnimations.metricPulse : DEFAULT_CONFIG.animations.metricPulse,
@@ -307,6 +332,9 @@ let activeToolName: string | null = null;
  * by the `ext:<key>` slots.
  */
 let footerDataRef: ReadonlyFooterDataProvider | null = null;
+/** Hydrated at lifecycle boundaries so compiled animation renders never scan the session. */
+const animationSnapshotCache = new AnimationSnapshotCache();
+let latestSessionContext: Record<string, any> | null = null;
 
 // ── Typing-animation settings (whitening ∝ speed) ──────────
 /** WPM at which the bar turns fully white. */
@@ -482,6 +510,49 @@ function computeLastTurnMetrics(entries: readonly any[]): { input: number; outpu
     return { input, output, cacheRead, cost };
   return null;
 }
+
+interface CompiledSessionStats {
+  readonly version: number;
+  readonly entries: readonly any[];
+  readonly metrics: ReturnType<typeof computeSessionMetrics>;
+  readonly info: ReturnType<typeof computeSessionInfo>;
+  readonly lastTurn: ReturnType<typeof computeLastTurnMetrics>;
+  readonly turnDuration: string;
+}
+let compiledSessionStatsCache: CompiledSessionStats | undefined;
+let compiledSessionStatsScans = 0;
+
+/** Compute O(n) session metrics once per lifecycle-hydrated snapshot version. */
+function compiledSessionStats(): CompiledSessionStats {
+  const snapshot = animationSnapshotCache.get();
+  if (compiledSessionStatsCache?.version === snapshot.version) return compiledSessionStatsCache;
+  const entries = snapshot.entries as readonly any[];
+  const metrics = computeSessionMetrics(entries);
+  const info = computeSessionInfo(entries);
+  const lastTurn = computeLastTurnMetrics(entries);
+  let turnDuration = "";
+  if (info.lastPromptTs) {
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index];
+      if (entry.type === "message" && entry.message?.role === "assistant") {
+        const timestamp = new Date(entry.timestamp).getTime();
+        if (!isNaN(timestamp)) turnDuration = formatDuration(Math.round((timestamp - info.lastPromptTs) / 1000));
+        break;
+      }
+    }
+  }
+  compiledSessionStatsScans++;
+  compiledSessionStatsCache = { version: snapshot.version, entries, metrics, info, lastTurn, turnDuration };
+  return compiledSessionStatsCache;
+}
+
+/** Test/diagnostic seams proving animation renders do not rescan session history. */
+export function compiledSessionStatsScanCount(): number { return compiledSessionStatsScans; }
+export function hydrateCompiledSessionStatsForTest(entries: readonly unknown[]): void {
+  animationSnapshotCache.hydrate({ getEntries: () => entries });
+  compiledSessionStats();
+}
+export function readCompiledSessionStatsForTest(): void { compiledSessionStats(); }
 
 // ── Brightness manipulation, works in BOTH truecolor AND 256-color ──
 // pi renders colors in truecolor (\x1b[38;2;r;g;bm) only when COLORTERM=truecolor;
@@ -835,6 +906,12 @@ export function buildInputSettingItems(
     values: ["on", "off"],
   }));
   return [{
+    id: "animation-engine",
+    label: "Animation engine",
+    description: "Legacy preserves the original renderer; compiled-v2 precompiles frames and uses one deadline timer.",
+    currentValue: config.animations.engine,
+    values: ["legacy", "compiled-v2"],
+  }, {
     id: "working-animation",
     label: "Working animation",
     description: "Animation above active subagent/workflow boxes. Random changes each Pi session; off hides it.",
@@ -849,6 +926,11 @@ export function applyInputSettingValue(
   id: string,
   newValue: string,
 ): boolean {
+  if (id === "animation-engine") {
+    if (!isAnimationEngine(newValue)) return false;
+    config.animations.engine = newValue;
+    return true;
+  }
   if (id === "working-animation") {
     if (!isWorkingAnimationChoice(newValue)) return false;
     runtime.selected = newValue;
@@ -956,21 +1038,45 @@ export function renderWorkingWidgetLines(
 
 class WorkingAnimationWidget {
   private timer: ReturnType<typeof setInterval> | undefined;
+  private compiled: CompiledAnimationEngine | undefined;
+  private compiledMode: "legacy" | "compiled-v2";
+  private compiledToolName: string | null | undefined;
+  private compiledExpression = "";
+  private compiledStateKey = "";
+  private compiledAnimation: CompiledAnimationId = "wave";
+  private compiledAccentAnsi = "";
   private readonly tui: TUI;
   private readonly runtime: AnimationRuntime;
-  private readonly ctx: { isIdle: () => boolean };
+  private readonly ctx: { isIdle: () => boolean; config: InputRevampConfig };
   private readonly theme: { getFgAnsi: (key: any) => string };
 
   constructor(
     tui: TUI,
     runtime: AnimationRuntime,
-    ctx: { isIdle: () => boolean },
+    ctx: { isIdle: () => boolean; config: InputRevampConfig },
     theme: { getFgAnsi: (key: any) => string },
   ) {
     this.tui = tui;
     this.runtime = runtime;
     this.ctx = ctx;
     this.theme = theme;
+    this.compiledMode = ctx.config.animations.engine;
+    if (this.compiledMode === "compiled-v2") this.createCompiled();
+  }
+
+  private createCompiled(): void {
+    this.compiled?.dispose();
+    this.compiledAccentAnsi = this.theme.getFgAnsi("accent");
+    this.compiledAnimation = (COMPILED_ANIMATION_IDS as readonly string[]).includes(this.runtime.resolved)
+      ? this.runtime.resolved as CompiledAnimationId : "wave";
+    this.compiledToolName = undefined;
+    this.compiledExpression = "";
+    this.compiledStateKey = "";
+    this.compiled = new CompiledAnimationEngine({
+      animation: this.compiledAnimation,
+      theme: { accentAnsi: this.compiledAccentAnsi },
+      requestRender: () => { try { this.tui.requestRender(); } catch { /* detached */ } },
+    });
   }
 
   private start(): void {
@@ -990,21 +1096,74 @@ class WorkingAnimationWidget {
     this.runtime.startedAt = 0;
   }
 
-  render(width: number): string[] {
-    const idle = this.ctx.isIdle();
-    if (!idle && this.runtime.selected !== "off") this.start();
-    else this.stop();
-    return renderWorkingWidgetLines(
-      this.runtime,
-      idle,
-      activeToolName,
-      width,
-      this.theme.getFgAnsi("accent"),
-    );
+  private renderCompiled(width: number, idle: boolean): string[] {
+    if (idle || this.runtime.selected === "off" || width <= 0) {
+      this.compiled?.stop();
+      this.runtime.startedAt = 0;
+      this.compiledToolName = undefined;
+      return [];
+    }
+    if (!this.compiled) this.createCompiled();
+    const compiled = this.compiled;
+    if (!compiled) return [];
+    const now = Date.now();
+    if (this.runtime.startedAt <= 0) {
+      this.runtime.startedAt = now;
+      this.runtime.expressionIndex = -1;
+      this.runtime.expressionChangedAt = 0;
+    }
+    if (this.compiledToolName !== activeToolName) {
+      this.compiledToolName = activeToolName;
+      this.runtime.expressionIndex = -1;
+      this.runtime.expressionChangedAt = 0;
+      this.compiledStateKey = activeToolName ? `tool:${activeToolName}` : "thinking";
+      this.compiledExpression = activeToolName ? `${activeToolName} · ${DEFAULT_TOOL_EXPRESSION}` : "";
+    }
+    if (!activeToolName && (this.runtime.expressionIndex < 0 || now - this.runtime.expressionChangedAt >= 10_000)) {
+      const previous = this.runtime.expressionIndex;
+      let next = Math.floor(Math.random() * THINKING_EXPRESSIONS.length);
+      if (THINKING_EXPRESSIONS.length > 1 && next === previous) next = (next + 1) % THINKING_EXPRESSIONS.length;
+      this.runtime.expressionIndex = next;
+      this.runtime.expressionChangedAt = now;
+      this.compiledExpression = THINKING_EXPRESSIONS[next] ?? DEFAULT_TOOL_EXPRESSION;
+    }
+    const animation = (COMPILED_ANIMATION_IDS as readonly string[]).includes(this.runtime.resolved)
+      ? this.runtime.resolved as CompiledAnimationId : "wave";
+    if (animation !== this.compiledAnimation) this.compiledAnimation = animation;
+    const accentAnsi = this.theme.getFgAnsi("accent");
+    if (accentAnsi !== this.compiledAccentAnsi) this.compiledAccentAnsi = accentAnsi;
+    compiled.update({ animation: this.compiledAnimation, label: this.compiledExpression, stateKey: this.compiledStateKey }, {
+      accentAnsi: this.compiledAccentAnsi,
+    });
+    compiled.prepare(width);
+    compiled.start();
+    // Scheduler owns the only timeout and advances the cached frame. No width
+    // measurement, glyph loop, ANSI conversion, or session scan occurs here.
+    return compiled.render() as string[];
   }
 
-  invalidate(): void {}
-  dispose(): void { this.stop(); }
+  render(width: number): string[] {
+    if (this.ctx.config.animations.engine !== this.compiledMode) {
+      this.stop();
+      this.compiled?.dispose();
+      this.compiled = undefined;
+      this.compiledMode = this.ctx.config.animations.engine;
+      if (this.compiledMode === "compiled-v2") this.createCompiled();
+    }
+    const idle = this.ctx.isIdle();
+    if (this.compiledMode === "compiled-v2") return this.renderCompiled(width, idle);
+    if (!idle && this.runtime.selected !== "off") this.start();
+    else this.stop();
+    return renderWorkingWidgetLines(this.runtime, idle, activeToolName, width, this.theme.getFgAnsi("accent"));
+  }
+
+  invalidate(): void {
+    if (this.compiledMode === "compiled-v2") {
+      this.compiledAccentAnsi = this.theme.getFgAnsi("accent");
+      this.compiled?.update({}, { accentAnsi: this.compiledAccentAnsi });
+    }
+  }
+  dispose(): void { this.stop(); this.compiled?.dispose(); this.compiled = undefined; }
 }
 
 const ANIMATION_MENU_OPTIONS: readonly WorkingAnimationChoice[] = [...WORKING_ANIMATIONS, "random", "off"];
@@ -1015,6 +1174,8 @@ export class AnimationPreviewMenu {
   private selectedIndex: number;
   private readonly startedAt = Date.now();
   private timer: ReturnType<typeof setInterval> | undefined;
+  private readonly engineMode: "legacy" | "compiled-v2";
+  private compiledPreviewScheduler: CompiledAnimationScheduler | undefined;
   private readonly tui: TUI;
   private readonly theme: {
     fg: (key: any, text: string) => string;
@@ -1034,24 +1195,58 @@ export class AnimationPreviewMenu {
     keybindings: KeybindingsManager,
     currentValue: string,
     done: (selectedValue?: string) => void,
+    engineMode: "legacy" | "compiled-v2" = "legacy",
   ) {
     this.tui = tui;
     this.theme = theme;
     this.keybindings = keybindings;
     this.done = done;
+    this.engineMode = engineMode;
+    if (engineMode === "compiled-v2") {
+      this.compiledPreviewScheduler = new CompiledAnimationScheduler({
+        requestRender: () => { try { this.tui.requestRender(); } catch { /* detached */ } },
+        frameCount: () => 2,
+        frameDuration: () => 80,
+      });
+      this.compiledPreviewScheduler.start();
+    }
     const currentIndex = ANIMATION_MENU_OPTIONS.indexOf(currentValue as WorkingAnimationChoice);
     this.selectedIndex = currentIndex >= 0 ? currentIndex : 0;
-    this.timer = setInterval(() => {
-      try { this.tui.requestRender(); } catch { /* submenu may be detached */ }
-    }, 80);
-    this.timer.unref?.();
+    if (engineMode === "legacy") {
+      this.timer = setInterval(() => {
+        try { this.tui.requestRender(); } catch { /* submenu may be detached */ }
+      }, 80);
+      this.timer.unref?.();
+    }
   }
 
-  private preview(option: WorkingAnimationChoice, elapsed: number): string {
+  private preview(option: WorkingAnimationChoice, elapsed: number, width: number): string {
     if (option === "off") return this.theme.fg("dim", "(hidden)");
     const resolved = option === "random"
       ? WORKING_ANIMATIONS[Math.floor(elapsed / 800) % WORKING_ANIMATIONS.length]
       : option;
+    if (this.engineMode === "compiled-v2") {
+      const animation = (COMPILED_ANIMATION_IDS as readonly string[]).includes(resolved)
+        ? resolved as CompiledAnimationId : "wave";
+      const compiled = compileAnimationFrames({
+        animation,
+        // Menu rows use the catalog's compact one-line projection; compiling a
+        // full-width multi-line frame and joining padded rows would crop away
+        // most motion in the narrow preview column.
+        width: Math.max(1, Math.min(width, 23)),
+        label: "",
+        stateKey: `preview:${option}`,
+        theme: { accentAnsi: this.theme.getFgAnsi("accent") },
+      });
+      const cycleMs = compiled.durations.reduce((sum, duration) => sum + duration, 0);
+      let cursor = cycleMs > 0 ? elapsed % cycleMs : 0;
+      let frame = 0;
+      while (frame < compiled.frameCount - 1 && cursor >= compiled.durations[frame]) {
+        cursor -= compiled.durations[frame];
+        frame++;
+      }
+      return [...(compiled.lines[frame] ?? [])].join(" ");
+    }
     const pulseOffset = Math.round(Math.sin(elapsed / 120) * 50);
     return renderWorkingAnimation(resolved, elapsed, {
       shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
@@ -1078,7 +1273,7 @@ export class AnimationPreviewMenu {
       const name = shortName + " ".repeat(Math.max(0, nameWidth - visibleWidth(shortName)));
       const styledName = selected ? this.theme.fg("accent", name) : this.theme.fg("text", name);
       const previewBudget = Math.max(0, width - prefixWidth - nameWidth - 1);
-      const preview = centerCropToWidth(this.preview(option, elapsed), previewBudget);
+      const preview = centerCropToWidth(this.preview(option, elapsed, previewBudget), previewBudget);
       lines.push(truncateToWidth(`${prefix}${styledName}${previewBudget > 0 ? " " : ""}${preview}`, width, ""));
     }
     if (start > 0 || end < ANIMATION_MENU_OPTIONS.length) {
@@ -1110,6 +1305,8 @@ export class AnimationPreviewMenu {
   dispose(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.compiledPreviewScheduler?.dispose();
+    this.compiledPreviewScheduler = undefined;
   }
 }
 
@@ -1143,6 +1340,7 @@ export function createInputSettingsComponent(
           activePreview = undefined;
           closeSubmenu(selectedValue);
         },
+        config.animations.engine,
       );
       activePreview = preview;
       return preview;
@@ -1208,7 +1406,7 @@ interface ElementRenderEnv {
  * The render is built from scratch via layoutText() for full control over the
  * spacing around the π.
  */
-class NerismaInputEditor extends CustomEditor {
+export class NerismaInputEditor extends CustomEditor {
   private ext: EditorContext;
   private config: InputRevampConfig;
   private _inputTimer: ReturnType<typeof setInterval> | undefined;
@@ -1320,7 +1518,7 @@ class NerismaInputEditor extends CustomEditor {
   }
 
   private _startInputAnimation() {
-    if (this._inputTimer) return;
+    if (this.config.animations.engine === "compiled-v2" || this._inputTimer) return;
     this._inputTimer = setInterval(() => {
       try { this.tui.requestRender(); } catch {}
     }, 50);
@@ -1334,7 +1532,7 @@ class NerismaInputEditor extends CustomEditor {
   }
 
   private _startDynamicWorkflowAnimation() {
-    if (this._dynamicWorkflowTimer) return;
+    if (this.config.animations.engine === "compiled-v2" || this._dynamicWorkflowTimer) return;
     this._dynamicWorkflowStartedAt = Date.now();
     this._dynamicWorkflowTimer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* editor may be detached */ }
@@ -1368,6 +1566,22 @@ class NerismaInputEditor extends CustomEditor {
       clearInterval(this._tokTimer);
       this._tokTimer = undefined;
     }
+  }
+
+  /** Enter compiled mode without leaving a legacy pulse that can resurrect later. */
+  private _disableLegacyAnimationState(): void {
+    this._stopInputAnimation();
+    this._stopDynamicWorkflowAnimation();
+    this._stopMetricAnimation();
+    this._stopSubmitAnimation();
+    this._stopTokAnimation();
+    this._typeIntensity = 0;
+    this._metricPulse = 0;
+    this._submitPulse = 0;
+    this._tokPulse = 0;
+    this._keyEvents = [];
+    this._wasPulsing = false;
+    this._pulsingElements.clear();
   }
 
   /**
@@ -1572,11 +1786,16 @@ class NerismaInputEditor extends CustomEditor {
 
     // ── Typing speed → bar whitening (INDEPENDENT of thinking) ──
     const configAnim = this.config.animations;
+    if (configAnim.engine === "compiled-v2") {
+      // v2 owns one deadline scheduler in the working widget; legacy editor
+      // intervals and their residual pulse state are cleared on mode switch.
+      this._disableLegacyAnimationState();
+    }
     const currentText = this.getText();
     if (currentText !== this._lastInputText) {
       const delta = currentText.length - this._lastInputText.length;
       // Submit detection: non-empty text → empty (message submitted or clear all).
-      if (configAnim.submitFlash && this._lastInputText !== "" && currentText === "") {
+      if (configAnim.engine === "legacy" && configAnim.submitFlash && this._lastInputText !== "" && currentText === "") {
         this._submitPulse = 1.0;
         if (!this._submitTimer) {
           this._submitTimer = setInterval(() => {
@@ -1597,7 +1816,7 @@ class NerismaInputEditor extends CustomEditor {
     }
 
     let borderT = 0;
-    if (configAnim.typingPulse) {
+    if (configAnim.engine === "legacy" && configAnim.typingPulse) {
       this._keyEvents = this._keyEvents.filter((e) => now - e.t < TYPING_WINDOW_MS);
       const charsInWindow = this._keyEvents.reduce((s, e) => s + e.n, 0);
       const wpm = (charsInWindow / 5) * (60000 / TYPING_WINDOW_MS);
@@ -1632,7 +1851,7 @@ class NerismaInputEditor extends CustomEditor {
 
     // Easter egg: keep the phrase and frame moving while the exact words are
     // present in the editor (case-insensitive and tolerant of extra whitespace).
-    const dynamicWorkflowActive = dynamicWorkflowMatches(currentText);
+    const dynamicWorkflowActive = configAnim.engine === "legacy" && dynamicWorkflowMatches(currentText);
     if (dynamicWorkflowActive && !this._dynamicWorkflowTimer) {
       this._startDynamicWorkflowAnimation();
     } else if (!dynamicWorkflowActive && this._dynamicWorkflowTimer) {
@@ -1640,7 +1859,7 @@ class NerismaInputEditor extends CustomEditor {
     }
 
     // Submit pulse (only if enabled)
-    const submitT = configAnim.submitFlash ? this._submitPulse : 0;
+    const submitT = configAnim.engine === "legacy" && configAnim.submitFlash ? this._submitPulse : 0;
     borderT = Math.max(borderT, submitT);
     // One shared phase drives every edge and corner, keeping the complete frame
     // perfectly synchronized instead of animating only the footer.
@@ -1659,6 +1878,8 @@ class NerismaInputEditor extends CustomEditor {
     let toolCount = 0;
     let tokEstimate = 0;
     let metrics: ReturnType<typeof computeSessionMetrics> = null;
+    let lastTurn: ReturnType<typeof computeLastTurnMetrics> = null;
+    let turnDuration = "";
     let hasAssistantResponse = false;
     let turnCount = 0;
     let sessionInfo: ReturnType<typeof computeSessionInfo> | null = null;
@@ -1667,10 +1888,20 @@ class NerismaInputEditor extends CustomEditor {
     };
 
     try {
-      entries = ctx.sessionManager?.getEntries?.() ?? [];
-      metrics = computeSessionMetrics(entries);
-      const info = computeSessionInfo(entries);
-      sessionInfo = info;
+      if (this.config.animations.engine === "compiled-v2") {
+        const cached = compiledSessionStats();
+        entries = cached.entries;
+        metrics = cached.metrics;
+        sessionInfo = cached.info;
+        lastTurn = cached.lastTurn;
+        turnDuration = cached.turnDuration;
+      } else {
+        entries = ctx.sessionManager?.getEntries?.() ?? [];
+        metrics = computeSessionMetrics(entries);
+        sessionInfo = computeSessionInfo(entries);
+        lastTurn = computeLastTurnMetrics(entries);
+      }
+      const info = sessionInfo;
       hasAssistantResponse = metrics !== null && metrics.output > 0;
       turnCount = info.turnCount;
       sessionElapsed = info.sessionStartTs ? Math.round((Date.now() - info.sessionStartTs) / 1000) : 0;
@@ -1688,7 +1919,7 @@ class NerismaInputEditor extends CustomEditor {
     } catch {}
 
     // Metrics change detection → pulse toward white.
-    if (configAnim.metricPulse && hasAssistantResponse) {
+    if (configAnim.engine === "legacy" && configAnim.metricPulse && hasAssistantResponse) {
       const sig = `${turnCount}|${metrics!.cost}|${metrics!.output}`;
       if (sig !== this._lastMetricsSig) {
         this._lastMetricsSig = sig;
@@ -1706,26 +1937,26 @@ class NerismaInputEditor extends CustomEditor {
           }, 16);
         }
       }
-    } else if (!configAnim.metricPulse) {
+    } else if (configAnim.engine === "compiled-v2" || !configAnim.metricPulse) {
       this._metricPulse = 0;
       this._pulsingElements.clear();
     }
 
     // ── Last turn tracking ──────────────────────────────
-    const lastTurn = computeLastTurnMetrics(entries);
     if (hasAssistantResponse && lastTurn && sessionInfo) {
-      const turnDuration = (() => {
+      if (this.config.animations.engine !== "compiled-v2") {
         const luts = sessionInfo.lastPromptTs;
-        if (!luts) return "";
-        for (let i = entries.length - 1; i >= 0; i--) {
-          const e = entries[i];
-          if (e.type === "message" && e.message?.role === "assistant") {
-            const ts = new Date(e.timestamp).getTime();
-            if (!isNaN(ts)) return formatDuration(Math.round((ts - luts) / 1000));
+        if (luts) {
+          for (let i = entries.length - 1; i >= 0; i--) {
+            const e = entries[i];
+            if (e.type === "message" && e.message?.role === "assistant") {
+              const ts = new Date(e.timestamp).getTime();
+              if (!isNaN(ts)) turnDuration = formatDuration(Math.round((ts - luts) / 1000));
+              break;
+            }
           }
         }
-        return "";
-      })();
+      }
       this._lastCompletedTurn = {
         turnNum: turnCount > 0 ? turnCount : 0,
         cost: lastTurn.cost,
@@ -1742,7 +1973,7 @@ class NerismaInputEditor extends CustomEditor {
       : null;
 
     // Pulse ~X tok when it updates (only if enabled).
-    if (configAnim.tokPulse && tokEstimate > 0) {
+    if (configAnim.engine === "legacy" && configAnim.tokPulse && tokEstimate > 0) {
       if (tokEstimate !== this._lastTokValue) {
         this._lastTokValue = tokEstimate;
         this._tokPulse = 1.0;
@@ -1757,14 +1988,14 @@ class NerismaInputEditor extends CustomEditor {
           }, 16);
         }
       }
-    } else if (!configAnim.tokPulse) {
+    } else if (configAnim.engine === "compiled-v2" || !configAnim.tokPulse) {
       this._tokPulse = 0;
     }
 
     // ── PulsedText wrapper for metric pulse ─────────────────
     // Applied per-element in _buildQuadrant only when the value just changed.
     const pulsedTextFinal = (ansi: string, text: string, curve: number = 1) => {
-      const mp = configAnim.metricPulse ? this._metricPulse : 0;
+      const mp = configAnim.engine === "legacy" && configAnim.metricPulse ? this._metricPulse : 0;
       const intensity = Math.pow(mp, curve);
       return intensity > 0.001 ? lerpToWhite(ansi, intensity, text) : `${ansi}${text}\x1b[39m`;
     };
@@ -1918,6 +2149,9 @@ export default function (pi: ExtensionAPI): void {
         config,
         animationRuntime,
         () => {
+          if (config.animations.engine === "compiled-v2" && latestSessionContext?.sessionManager) {
+            animationSnapshotCache.hydrate(latestSessionContext.sessionManager);
+          }
           if (!saveConfig(config)) ctx.ui.notify("Could not save input/footer settings", "error");
         },
         () => done(undefined),
@@ -1932,6 +2166,10 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", (_event, ctx) => {
+    latestSessionContext = ctx as Record<string, any>;
+    if (config.animations.engine === "compiled-v2") {
+      animationSnapshotCache.hydrate(ctx.sessionManager);
+    }
     // Resolve random once per session, never per render or per working turn.
     animationRuntime.selected = config.animations.working;
     animationRuntime.resolved = pickWorkingAnimation(
@@ -1952,7 +2190,7 @@ export default function (pi: ExtensionAPI): void {
     // registration remains above its later subagent/workflow status widgets.
     ctx.ui.setWidget(
       "input-revamp-working",
-      (tui, theme) => new WorkingAnimationWidget(tui, animationRuntime, ctx, theme),
+      (tui, theme) => new WorkingAnimationWidget(tui, animationRuntime, { isIdle: ctx.isIdle, config }, theme),
       { placement: "aboveEditor" },
     );
 
@@ -1970,6 +2208,14 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
       return new NerismaInputEditor(tui, theme, keybindings, { pi, ctx, config });
     });
+  });
+
+  // Final agent completion is the correctness boundary for session metrics. Refresh
+  // once here rather than from every compiled animation render.
+  pi.on("agent_end", () => {
+    if (config.animations.engine === "compiled-v2" && latestSessionContext?.sessionManager) {
+      animationSnapshotCache.refresh(latestSessionContext.sessionManager);
+    }
   });
 
   // Track the running tool for the animated expressions.
