@@ -177,14 +177,10 @@ combining marks, flags, ZWJ emoji, and CJK—and use only the active theme accen
 bold/dim intensity fallback. The selected settings preview includes the matching sample text.
 
 The Working animation submenu now drives every row from the same advanced sprite engine and
-adds a full live panel for the selected row. A 30 FPS preview cadence, shortened keyframe
-holds, and phase-aware crossfades hide each silhouette at the exact switch before revealing the
-next one, without producing malformed hybrid faces. Finite enter/exit sequences hold their final
-frame instead of wrapping backward, target clocks start after each crossfade so opening keyframes
-are not skipped, and final exit frames fade fully away before removal. Rapid tool-state changes
-continue from the currently displayed opacity rather than flashing back to full brightness. Accent
-shaders are cached so the preview does not repeatedly parse ANSI
-colors for every glyph. Its repeating showcase visibly steps through
+adds a full live panel for the selected row. Both widget and preview use a 30 FPS cadence,
+short frame holds, a low-amplitude traveling highlight, and staggered whole-row geometry updates.
+Rows remain fully visible—there are no conceal-based fades—so faces and symbols stay intact without
+flickering. Its repeating showcase visibly steps through
 `ENTER`, `IDLE`, `ACTION`, and `EXIT`, so the picker previews the actual phased art rather than
 the legacy one-line loop. `random` changes examples after each complete showcase (but resolves
 once per actual pi session), and `off` explicitly previews the hidden state.

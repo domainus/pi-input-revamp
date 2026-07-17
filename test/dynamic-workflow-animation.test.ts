@@ -18,7 +18,6 @@ import installInputRevamp, {
   applyInputSettingValue,
   buildInputSettingItems,
   createInputSettingsComponent,
-  createAnimationColors,
   dynamicWorkflowMatches,
   dynamicWorkflowRanges,
   isElementVisible,
@@ -42,6 +41,21 @@ import installInputRevamp, {
 
 const accent = "\x1b[38;2;77;163;255m";
 const stripAnsi = (text: string) => text.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
+const containsConcealSgr = (text: string): boolean => {
+  for (const match of text.matchAll(/\x1b\[([0-9;]*)m/g)) {
+    const parameters = match[1].split(";").filter(Boolean).map(Number);
+    for (let index = 0; index < parameters.length; index++) {
+      const parameter = parameters[index];
+      if (parameter === 38 || parameter === 48) {
+        const mode = parameters[index + 1];
+        index += mode === 2 ? 4 : mode === 5 ? 2 : 1;
+        continue;
+      }
+      if (parameter === 8) return true;
+    }
+  }
+  return false;
+};
 
 test("matches singular and plural dynamic workflow phrases consistently", () => {
   for (const value of [
@@ -121,56 +135,33 @@ test("animation cadence avoids long frame holds and low-refresh preview stutter"
   }
 });
 
-test("advanced sprites crossfade between keyframes without boundary jumps", () => {
-  const colors = createAnimationColors(accent, 0);
+test("advanced sprites use intact-row intermediate frames without conceal flicker", () => {
+  assert.equal(containsConcealSgr("\x1b[1;8mhidden\x1b[28m"), true);
+  assert.equal(containsConcealSgr("\x1b[38;5;8mgray\x1b[39m"), false);
+  assert.equal(containsConcealSgr("\x1b[38;2;8;80;180mcolor\x1b[39m"), false);
+  const transition = sampleAnimationFrameTransition("slime", 40, "idle");
+  const rendered = renderAdvancedAnimation("slime", 40, "idle", {
+    shade: (text) => text,
+    pulseOffset: 0,
+  });
+  assert.equal(rendered[0], transition.next.lines[0], "top row did not advance into an intermediate pose");
+  assert.equal(rendered[1], transition.current.lines[1], "face row was split or advanced too early");
+  assert.equal(rendered[2], transition.current.lines[2], "base row was split or advanced too early");
   for (const animation of WORKING_ANIMATIONS) {
-    const first = sampleAnimationFrameTransition(animation, 0, "idle").current;
-    const duration = first.duration;
-    const samples = [0, 0.24, 0.48, 0.72, 0.93].map((progress) =>
-      renderAdvancedAnimation(animation, Math.floor(duration * progress), "idle", colors).join("\n"));
-    assert.ok(new Set(samples).size >= 3, `${animation} did not generate intermediate fade levels`);
-    const beforeBoundary = renderAdvancedAnimation(animation, duration - 1, "idle", colors);
-    const atBoundary = renderAdvancedAnimation(animation, duration, "idle", colors);
-    assert.deepEqual(beforeBoundary.map(stripAnsi), atBoundary.map(stripAnsi), `${animation} jumped at its idle frame boundary`);
-  }
-});
-
-test("finite lifecycle phases never wrap backward and silhouette switches are truly hidden", () => {
-  for (const phase of ["enter", "exit"] as const) {
-    const duration = animationPhaseDuration("slime", phase);
-    for (const elapsed of [duration - 1, duration, duration + 1, duration * 10]) {
-      const transition = sampleAnimationFrameTransition("slime", elapsed, phase);
-      assert.equal(transition.current, transition.next, `${phase} wrapped its final frame backward at ${elapsed}`);
+    for (const phase of ["enter", "idle", "action", "exit"] as const) {
+      for (const elapsed of [0, 33, 66, 99, 132, 264]) {
+        const output = renderAdvancedAnimation(animation, elapsed, phase, {
+          shade: (text, amount) => `\x1b[38;2;${100 + Math.max(-100, Math.min(100, amount))};180;255m${text}\x1b[39m`,
+          pulseOffset: 0,
+        }).join("\n");
+        assert.equal(containsConcealSgr(output), false, `${animation}/${phase} concealed a frame`);
+      }
     }
-  }
-  const idleDuration = sampleAnimationFrameTransition("slime", 0, "idle").current.duration;
-  for (const color of [accent, "\x1b[38;5;33m", "\x1b[31m", "\x1b[0;31m", "\x1b[123m", ""]) {
-    for (const pulse of [-50, 50]) {
-      const midpoint = renderAdvancedAnimation(
-        "slime",
-        Math.floor(idleDuration / 2),
-        "idle",
-        createAnimationColors(color, pulse),
-      ).join("\n");
-      assert.match(midpoint, /\x1b\[8m/, `midpoint remained visible for ${JSON.stringify(color)} pulse ${pulse}`);
+    for (const phase of ["enter", "exit"] as const) {
+      const duration = animationPhaseDuration(animation, phase);
+      const finite = sampleAnimationFrameTransition(animation, duration * 10, phase);
+      assert.equal(finite.current, finite.next, `${animation}/${phase} wrapped backward`);
     }
-  }
-  const resetBearingMidpoint = renderAdvancedAnimation(
-    "slime",
-    Math.floor(idleDuration / 2),
-    "idle",
-    createAnimationColors("\x1b[0;31m", 50),
-  ).join("\n");
-  assert.match(resetBearingMidpoint, /\x1b\[0;31m\x1b\[8m/, "reset-bearing accent cancelled conceal");
-  for (const color of ["\x1b[31m", "\x1b[0;31m", "\x1b[123m", ""]) {
-    const partial = renderAdvancedAnimation(
-      "slime",
-      Math.floor(idleDuration / 4),
-      "idle",
-      createAnimationColors(color, 50),
-    ).join("\n");
-    assert.match(partial, /\x1b\[2m/, `fallback fade was not dim for ${JSON.stringify(color)}`);
-    assert.doesNotMatch(partial, /\x1b\[1m/, `layer brightness overrode fallback fade for ${JSON.stringify(color)}`);
   }
 });
 
@@ -270,38 +261,36 @@ test("advanced renderer adapts tiers, closes ANSI, and transitions enter/action/
   const runtime: AnimationRuntime = { selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0 };
   renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_000);
   assert.equal(runtime.phase, "enter");
-  const idleTransitionStart = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_240);
+  renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_132);
+  const sourceRows = getAnimationDefinition("slime").frames.filter((frame) => frame.phase === "enter").at(-1)!.lines.map((line) => line.trimEnd());
+  const targetRows = getAnimationDefinition("slime").frames.find((frame) => frame.phase === "idle")!.lines.map((line) => line.trimEnd());
+  const spriteRows = (lines: string[]) => lines.slice(0, 3).map((line) => stripAnsi(line).trimEnd());
+  const transitionStart = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_210);
   assert.equal(runtime.phase, "idle");
-  assert.ok(idleTransitionStart.length > 0);
-  const idleMidpoint = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_290);
-  assert.ok(idleMidpoint.some((line) => line.includes("\x1b[8m")), "enter→idle switched while visible");
-  const firstIdle = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_339);
-  assert.match(stripAnsi(firstIdle.join("\n")), /╭───╮/, "idle phase did not settle on slime-round");
-  renderAdvancedWorkingWidgetLines(runtime, false, "bash", 40, accentAnsi, 1_350);
+  assert.deepEqual(spriteRows(transitionStart), [...sourceRows], "phase boundary replaced every row immediately");
+  const firstIntermediate = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_243);
+  assert.deepEqual(spriteRows(firstIntermediate), [targetRows[0], sourceRows[1], sourceRows[2]]);
+  const secondIntermediate = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_276);
+  assert.deepEqual(spriteRows(secondIntermediate), [targetRows[0], targetRows[1], sourceRows[2]]);
+  const firstIdle = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_309);
+  assert.deepEqual(spriteRows(firstIdle), [...targetRows]);
+  renderAdvancedWorkingWidgetLines(runtime, false, "bash", 40, accentAnsi, 1_320);
   assert.equal(runtime.phase, "action");
-  const actionMidpoint = renderAdvancedWorkingWidgetLines(runtime, false, "bash", 40, accentAnsi, 1_400);
-  assert.ok(actionMidpoint.some((line) => line.includes("\x1b[8m")), "idle→action switched while visible");
-  renderAdvancedWorkingWidgetLines(runtime, false, "bash", 40, accentAnsi, 1_449);
-  const exiting = renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_480);
+  renderAdvancedWorkingWidgetLines(runtime, false, "bash", 40, accentAnsi, 1_420);
+  const exiting = renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_450);
   assert.ok(exiting.length > 0);
   assert.equal(runtime.phase, "exit");
-  const exitMidpoint = renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_530);
-  assert.ok(exitMidpoint.some((line) => line.includes("\x1b[8m")), "action→exit switched while visible");
-  const finalExitFade = renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_799);
-  assert.ok(finalExitFade.some((line) => line.includes("\x1b[8m")), "final exit frame did not fade to hidden");
-  const fullyHiddenExit = renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_820);
-  assert.ok(fullyHiddenExit.length > 0 && fullyHiddenExit.some((line) => line.includes("\x1b[8m")), "exit skipped its fully hidden cadence tick");
-  assert.deepEqual(renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_850), []);
+  assert.deepEqual(renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_800), []);
   assert.equal(runtime.phase, "idle");
 
   const compactRuntime: AnimationRuntime = { selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0 };
   const compactEnter = stripAnsi(renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_000)[0]);
-  renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_240);
-  renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_340);
-  renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_350);
-  const compactAction = stripAnsi(renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_550)[0]);
+  renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_210);
+  renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_310);
+  renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_320);
+  const compactAction = stripAnsi(renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_500)[0]);
   assert.match(compactEnter, /╭───╮/, "compact enter lost its phase-specific dome");
-  assert.match(compactAction, /ᴗ/, "compact action did not use its phase-specific face");
+  assert.match(compactAction, />ᴗ</, "compact action did not use its phase-specific face");
   assert.notEqual(compactEnter, compactAction);
 
   for (const animation of WORKING_ANIMATIONS) {
@@ -313,41 +302,35 @@ test("advanced renderer adapts tiers, closes ANSI, and transitions enter/action/
   }
 });
 
-test("exit lifecycle renders a cadence-aligned fully hidden frame before removal", () => {
-  const exitDuration = animationPhaseDuration("slime", "exit");
-  const fadeDuration = WORKING_ANIMATION_TICK_MS * 3;
-  const firstTickAfterFade = Math.ceil((exitDuration + fadeDuration) / WORKING_ANIMATION_TICK_MS) * WORKING_ANIMATION_TICK_MS;
-  const runtime: AnimationRuntime = {
-    selected: "slime", resolved: "slime", startedAt: 1, expressionIndex: 0, expressionChangedAt: 1,
-    phase: "exit", phaseStartedAt: 1_000, lastActive: false, lastToolName: null,
-  };
-  const hidden = renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accent, 1_000 + firstTickAfterFade);
-  assert.ok(hidden.length > 0 && hidden.some((line) => line.includes("\x1b[8m")));
-  assert.deepEqual(
-    renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accent, 1_000 + firstTickAfterFade + WORKING_ANIMATION_TICK_MS),
-    [],
-  );
-});
+test("hidden-idle activation and interrupted row transitions preserve displayed geometry", () => {
+  const accentAnsi = "\x1b[38;2;77;163;255m";
+  const normalize = (lines: string[]) => lines.slice(0, 3).map((line) => stripAnsi(line).trimEnd());
+  const enterRows = getAnimationDefinition("slime").frames.find((frame) => frame.phase === "enter")!.lines.map((line) => line.trimEnd());
 
-test("rapid phase interruption preserves the currently displayed opacity", () => {
-  const runtime: AnimationRuntime = {
-    selected: "slime",
-    resolved: "slime",
-    startedAt: 1,
-    expressionIndex: 0,
-    expressionChangedAt: 1,
-    phase: "exit",
-    phaseStartedAt: 1_000,
-    lastActive: false,
-    lastToolName: null,
-    displayedPhase: "action",
-    displayedElapsed: 50,
-    displayedOpacity: 0.05,
+  const startup: AnimationRuntime = {
+    selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0,
   };
-  const lines = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accent, 1_100);
-  assert.equal(runtime.phase, "enter");
-  assert.ok(lines.some((line) => line.includes("\x1b[8m")), "interrupted transition jumped back to full brightness");
-  assert.equal(runtime.transitionFromOpacity, 0.05);
+  assert.deepEqual(renderAdvancedWorkingWidgetLines(startup, true, null, 40, accentAnsi, 1_000), []);
+  const activated = renderAdvancedWorkingWidgetLines(startup, false, null, 40, accentAnsi, 1_100);
+  assert.deepEqual(normalize(activated), enterRows, "hidden idle was invented as the activation source");
+
+  const interrupted: AnimationRuntime = {
+    selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0,
+  };
+  renderAdvancedWorkingWidgetLines(interrupted, false, null, 40, accentAnsi, 2_000);
+  renderAdvancedWorkingWidgetLines(interrupted, false, null, 40, accentAnsi, 2_210);
+  const partial = renderAdvancedWorkingWidgetLines(interrupted, false, null, 40, accentAnsi, 2_243);
+  const restarted = renderAdvancedWorkingWidgetLines(interrupted, false, "bash", 40, accentAnsi, 2_250);
+  assert.deepEqual(normalize(restarted), normalize(partial), "interruption reconstructed a complete target sprite");
+
+  const exitDuration = animationPhaseDuration("slime", "exit");
+  const blanking: AnimationRuntime = {
+    selected: "slime", resolved: "slime", startedAt: 1, expressionIndex: 0, expressionChangedAt: 1,
+    phase: "exit", phaseStartedAt: 3_000, lastActive: false, lastToolName: null,
+  };
+  const partiallyBlank = renderAdvancedWorkingWidgetLines(blanking, true, null, 40, accentAnsi, 3_000 + exitDuration + 33);
+  const reactivated = renderAdvancedWorkingWidgetLines(blanking, false, null, 40, accentAnsi, 3_000 + exitDuration + 40);
+  assert.deepEqual(normalize(reactivated), normalize(partiallyBlank), "reactivation resurrected blanked exit rows");
 });
 
 test("config merging preserves layout while visibility and animation-off remain backward compatible", () => {
@@ -407,31 +390,28 @@ test("animation preview showcase cycles through every advanced lifecycle phase",
   assert.equal(resolveAnimationPreviewOption("off", 0), null);
 });
 
-test("animation preview opens without treating startup as a phase boundary", () => {
-  const oldNow = Date.now;
-  try {
-    Date.now = () => 10_000;
-    const menu = new AnimationPreviewMenu(
-      { requestRender() {} } as any,
-      {
-        fg: (_key: string, text: string) => text,
-        bold: (text: string) => text,
-        getFgAnsi: () => accent,
-      },
-      { matches() { return false; } } as any,
-      "slime",
-      () => {},
-    );
-    const lines = menu.render(40);
-    assert.ok(lines.some((line) => stripAnsi(line).includes("slime · ENTER")));
-    assert.ok(lines.every((line) => !line.includes("\x1b[8m")), "preview blinked hidden immediately after opening");
-    const beforeBoundary = (menu as any).previewSprite("slime", 1_799).lines.map(stripAnsi);
-    const outgoingAtBoundary = (menu as any).previewSprite("slime", 1_800).lines.map(stripAnsi);
-    assert.deepEqual(outgoingAtBoundary, beforeBoundary, "preview outgoing clock jumped at idle→action boundary");
-    menu.dispose();
-  } finally {
-    Date.now = oldNow;
-  }
+test("preview phase boundaries stagger complete rows with a continuous motion clock", () => {
+  const menu = new AnimationPreviewMenu(
+    { requestRender() {} } as any,
+    {
+      fg: (_key: string, text: string) => text,
+      bold: (text: string) => text,
+      getFgAnsi: () => accent,
+    },
+    { matches() { return false; } } as any,
+    "slime",
+    () => {},
+  );
+  const rowsAt = (elapsed: number) => (menu as any).previewSprite("slime", elapsed).lines.map((line: string) => stripAnsi(line).trimEnd());
+  const source = rowsAt(1_799);
+  const start = rowsAt(1_800);
+  const first = rowsAt(1_833);
+  const second = rowsAt(1_866);
+  const target = rowsAt(1_899);
+  assert.deepEqual(start, source, "preview replaced all rows at idle→action boundary");
+  assert.deepEqual(first, [target[0], source[1], source[2]]);
+  assert.deepEqual(second, [target[0], target[1], source[2]]);
+  menu.dispose();
 });
 
 test("animation submenu renders live previews and returns the selected option", async () => {
