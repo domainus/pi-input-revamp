@@ -1336,8 +1336,27 @@ class WorkingAnimationWidget {
 
 const ANIMATION_MENU_OPTIONS: readonly WorkingAnimationChoice[] = [...WORKING_ANIMATIONS, "random", "off"];
 const ANIMATION_MENU_VISIBLE_ROWS = 10;
+export const ANIMATION_PREVIEW_CYCLE_MS = 3_600;
 
-/** One-row-per-option animated picker used by the working-animation submenu. */
+export function animationPreviewMoment(elapsed: number): { phase: AnimationPhase; elapsed: number } {
+  const cycleElapsed = ((elapsed % ANIMATION_PREVIEW_CYCLE_MS) + ANIMATION_PREVIEW_CYCLE_MS) % ANIMATION_PREVIEW_CYCLE_MS;
+  if (cycleElapsed < 600) return { phase: "enter", elapsed: cycleElapsed };
+  if (cycleElapsed < 1_800) return { phase: "idle", elapsed: cycleElapsed - 600 };
+  if (cycleElapsed < 2_800) return { phase: "action", elapsed: cycleElapsed - 1_800 };
+  return { phase: "exit", elapsed: cycleElapsed - 2_800 };
+}
+
+export function resolveAnimationPreviewOption(
+  option: WorkingAnimationChoice,
+  elapsed: number,
+): WorkingAnimation | null {
+  if (option === "off") return null;
+  if (option !== "random") return option;
+  const cycleIndex = Math.floor(Math.max(0, elapsed) / ANIMATION_PREVIEW_CYCLE_MS);
+  return WORKING_ANIMATIONS[cycleIndex % WORKING_ANIMATIONS.length];
+}
+
+/** Animated picker whose rows and selected panel use the advanced phase engine. */
 export class AnimationPreviewMenu {
   private selectedIndex: number;
   private readonly startedAt = Date.now();
@@ -1375,34 +1394,34 @@ export class AnimationPreviewMenu {
   }
 
   private previewResolved(option: WorkingAnimationChoice, elapsed: number): WorkingAnimation | null {
-    if (option === "off") return null;
     // random intentionally cycles in this menu only. The selected value is
     // still resolved once by pickWorkingAnimation at session start.
-    return option === "random"
-      ? WORKING_ANIMATIONS[Math.floor(elapsed / 800) % WORKING_ANIMATIONS.length]
-      : option;
+    return resolveAnimationPreviewOption(option, elapsed);
   }
 
   private preview(option: WorkingAnimationChoice, elapsed: number): string {
     const resolved = this.previewResolved(option, elapsed);
     if (!resolved) return this.theme.fg("dim", "(hidden)");
-    const pulseOffset = Math.round(Math.sin(elapsed / 120) * 50);
-    return renderWorkingAnimation(resolved, elapsed, {
+    const moment = animationPreviewMoment(elapsed);
+    const lines = renderAdvancedAnimation(resolved, moment.elapsed, moment.phase, {
       shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
-      pulseOffset,
+      pulseOffset: Math.round(Math.sin(elapsed / 120) * 50),
     });
+    return lines[Math.floor(lines.length / 2)] ?? "";
   }
 
   private expandedPreview(option: WorkingAnimationChoice, elapsed: number, width: number): string[] {
     const resolved = this.previewResolved(option, elapsed);
     if (!resolved) return [this.theme.fg("dim", "  preview hidden (off)")];
-    const lines = renderAdvancedAnimation(resolved, elapsed, "idle", {
+    const moment = animationPreviewMoment(elapsed);
+    const lines = renderAdvancedAnimation(resolved, moment.elapsed, moment.phase, {
       shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
       pulseOffset: Math.round(Math.sin(elapsed / 120) * 50),
     });
+    const phaseLabel = moment.phase.toUpperCase();
     const label = option === "random"
-      ? `  ${option} · cycles examples in preview (session resolves once)`
-      : `  ${resolved} · live expanded preview`;
+      ? `  ${option} → ${resolved} · ${phaseLabel} · cycles each showcase`
+      : `  ${resolved} · ${phaseLabel} · live phased preview`;
     return [this.theme.fg("dim", label), ...lines.slice(0, 3).map((line) => ansiSafeLine(line, width, false))];
   }
 
@@ -1431,8 +1450,8 @@ export class AnimationPreviewMenu {
     if (start > 0 || end < ANIMATION_MENU_OPTIONS.length) {
       lines.push(truncateToWidth(this.theme.fg("dim", `  (${this.selectedIndex + 1}/${ANIMATION_MENU_OPTIONS.length})`), width, ""));
     }
-    // Keep compact previews in each row, while the selected row gets a live
-    // multi-line panel. It is intentionally capped so SettingsList remains
+    // Every row uses a phase-aware advanced sprite slice; the selected row
+    // also gets the full live panel. It is capped so SettingsList remains
     // safe in a 24-row terminal even when the list scrolls.
     lines.push(...this.expandedPreview(ANIMATION_MENU_OPTIONS[this.selectedIndex], elapsed, width));
     lines.push(truncateToWidth(this.theme.fg("dim", " ↑↓ preview · Enter choose · Esc back"), width, ""));

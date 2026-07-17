@@ -167,9 +167,11 @@ face, highlights, wobble, squash/stretch, action bounce, and melt/pop exit frame
 aura, mecha, flame, invader, and triforce also have dedicated multi-line treatments; the
 remaining effects use a validated generic wrapper.
 
-The Working animation submenu keeps compact previews in every row and adds a live expanded
-panel for the selected row. `random` cycles examples only while previewing (it resolves once
-per actual pi session), and `off` explicitly previews the hidden state.
+The Working animation submenu now drives every row from the same advanced sprite engine and
+adds a full live panel for the selected row. Its repeating showcase visibly steps through
+`ENTER`, `IDLE`, `ACTION`, and `EXIT`, so the picker previews the actual phased art rather than
+the legacy one-line loop. `random` changes examples after each complete showcase (but resolves
+once per actual pi session), and `off` explicitly previews the hidden state.
 
 ## How it works
 

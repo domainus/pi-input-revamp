@@ -6,6 +6,9 @@ import path from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import installInputRevamp, {
   AnimationPreviewMenu,
+  ANIMATION_PREVIEW_CYCLE_MS,
+  animationPreviewMoment,
+  resolveAnimationPreviewOption,
   INPUT_SETTINGS_VISIBLE_ROWS,
   WORKING_ANIMATIONS,
   applyInputSettingValue,
@@ -231,6 +234,18 @@ test("settings expose bounded searchable-row data and callbacks preserve hidden 
   assert.equal(applyInputSettingValue(config, runtime, "bad-id", "on"), false);
 });
 
+test("animation preview showcase cycles through every advanced lifecycle phase", () => {
+  assert.deepEqual(animationPreviewMoment(0), { phase: "enter", elapsed: 0 });
+  assert.deepEqual(animationPreviewMoment(600), { phase: "idle", elapsed: 0 });
+  assert.deepEqual(animationPreviewMoment(1_800), { phase: "action", elapsed: 0 });
+  assert.deepEqual(animationPreviewMoment(2_800), { phase: "exit", elapsed: 0 });
+  assert.deepEqual(animationPreviewMoment(ANIMATION_PREVIEW_CYCLE_MS), { phase: "enter", elapsed: 0 });
+  assert.equal(resolveAnimationPreviewOption("random", -1), WORKING_ANIMATIONS[0]);
+  assert.equal(resolveAnimationPreviewOption("random", ANIMATION_PREVIEW_CYCLE_MS - 1), WORKING_ANIMATIONS[0]);
+  assert.equal(resolveAnimationPreviewOption("random", ANIMATION_PREVIEW_CYCLE_MS), WORKING_ANIMATIONS[1]);
+  assert.equal(resolveAnimationPreviewOption("off", 0), null);
+});
+
 test("animation submenu renders live previews and returns the selected option", async () => {
   let selected: string | undefined;
   let requestedRenders = 0;
@@ -255,7 +270,7 @@ test("animation submenu renders live previews and returns the selected option", 
   );
   const first = menu.render(32);
   assert.ok(first.some((line) => line.includes("fairy")));
-  assert.ok(first.some((line) => line.includes("live expanded preview")));
+  assert.ok(first.some((line) => line.includes("fairy · ENTER")));
   assert.ok(first.length >= 14, "selected row did not receive a multi-line preview panel");
   const slimeMenu = new AnimationPreviewMenu(
     { requestRender() {} } as any,
@@ -269,8 +284,23 @@ test("animation submenu renders live previews and returns the selected option", 
     () => {},
   );
   const narrowSlimeRow = slimeMenu.render(18).find((line) => line.includes("slime"));
-  assert.match(narrowSlimeRow ?? "", /slime.*•/, "narrow slime preview lost its visible core");
+  assert.match(narrowSlimeRow ?? "", /slime.*[╭─]/, "narrow slime preview lost its phase-specific sprite core");
   slimeMenu.dispose();
+  const offMenu = new AnimationPreviewMenu(
+    { requestRender() {} } as any,
+    {
+      fg: (_key: string, text: string) => text,
+      bold: (text: string) => text,
+      getFgAnsi: () => accent,
+    },
+    keybindings,
+    "off",
+    () => {},
+  );
+  const offLines = offMenu.render(32);
+  assert.ok(offLines.some((line) => line.includes("(hidden)")), "off row did not preview its hidden state");
+  assert.ok(offLines.some((line) => line.includes("preview hidden (off)")), "off panel did not preview its hidden state");
+  offMenu.dispose();
   assert.ok(first.every((line) => visibleWidth(line) <= 32));
   await new Promise((resolve) => setTimeout(resolve, 90));
   assert.ok(requestedRenders > 0);
