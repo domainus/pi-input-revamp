@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   dynamicWorkflowMatches,
   dynamicWorkflowRanges,
@@ -40,11 +41,11 @@ test("rejects longer words and Unicode-letter adjacency", () => {
 
 test("fairy working animation keeps a stable five-glyph silhouette while fluttering", () => {
   const frames = [0, 130, 260, 390].map((elapsed) => renderWorkingAnimation("fairy", elapsed, {
-    shade: (text) => text,
+    shade: (text, amount) => `\x1b[38;2;${Math.max(0, Math.min(255, 100 + amount))};180;255m${text}\x1b[39m`,
     pulseOffset: 0,
   }));
   assert.equal(new Set(frames).size, 4);
-  assert.ok(frames.every((frame) => Array.from(frame).length === 5));
+  assert.ok(frames.every((frame) => visibleWidth(frame) === 5));
   assert.ok(frames.some((frame) => frame.includes("●")));
   assert.ok(frames.some((frame) => frame.includes("◉")));
   assert.ok(frames.some((frame) => frame.includes("ʚ") && frame.includes("ɞ")));

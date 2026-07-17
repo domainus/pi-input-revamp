@@ -683,22 +683,27 @@ export function renderWorkingAnimation(animation: WorkingAnimation, elapsed: num
     }).join("");
   }
 
-  // Tiny fairy companion: a bright pulsing orb, fluttering wings, and two
-  // orbiting motes. It evokes a familiar forest guide without copying artwork.
-  const fairyFrames = [
-    { leftMote: "·", leftWing: "ʚ", core: "●", rightWing: "ɞ", rightMote: "·" },
-    { leftMote: "✧", leftWing: "‹", core: "◉", rightWing: "›", rightMote: "·" },
-    { leftMote: "·", leftWing: "ʚ", core: "●", rightWing: "ɞ", rightMote: "✦" },
-    { leftMote: "·", leftWing: "‹", core: "◉", rightWing: "›", rightMote: "✧" },
-  ];
-  const frame = fairyFrames[Math.floor(elapsed / 130) % fairyFrames.length];
-  return [
-    c.shade(frame.leftMote, 15 + c.pulseOffset),
-    c.shade(frame.leftWing, 50 + c.pulseOffset),
-    c.shade(frame.core, 105 + c.pulseOffset),
-    c.shade(frame.rightWing, 50 + c.pulseOffset),
-    c.shade(frame.rightMote, 15 + c.pulseOffset),
-  ].join("");
+  if (animation === "fairy") {
+    // Tiny fairy companion: a bright pulsing orb, fluttering wings, and two
+    // orbiting motes. It evokes a familiar forest guide without copying artwork.
+    const fairyFrames = [
+      { leftMote: "·", leftWing: "ʚ", core: "●", rightWing: "ɞ", rightMote: "·" },
+      { leftMote: "✧", leftWing: "‹", core: "◉", rightWing: "›", rightMote: "·" },
+      { leftMote: "·", leftWing: "ʚ", core: "●", rightWing: "ɞ", rightMote: "✦" },
+      { leftMote: "·", leftWing: "‹", core: "◉", rightWing: "›", rightMote: "✧" },
+    ];
+    const frame = fairyFrames[Math.floor(elapsed / 130) % fairyFrames.length];
+    return [
+      c.shade(frame.leftMote, 15 + c.pulseOffset),
+      c.shade(frame.leftWing, 50 + c.pulseOffset),
+      c.shade(frame.core, 105 + c.pulseOffset),
+      c.shade(frame.rightWing, 50 + c.pulseOffset),
+      c.shade(frame.rightMote, 15 + c.pulseOffset),
+    ].join("");
+  }
+
+  const exhaustive: never = animation;
+  return exhaustive;
 }
 
 // ── Custom editor ─────────────────────────────────────────
