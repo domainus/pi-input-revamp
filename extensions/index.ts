@@ -731,11 +731,21 @@ export interface AnimationDefinition {
 
 export type AnimationTier = "full" | "condensed" | "compact";
 
-/** Terminal-friendly 10 FPS repaint cadence; text effects are quantized to 4 FPS. */
-export const WORKING_ANIMATION_TICK_MS = 100;
-export const ANIMATION_PREVIEW_TICK_MS = 100;
-export const ANIMATION_STATUS_EFFECT_TICK_MS = 250;
+/**
+ * Terminal-friendly motion cadence. Widgets and previews get a 20 FPS render
+ * opportunity, while status/text effects deliberately quantize to 10 FPS so
+ * complete poses remain stable between meaningful ticks.
+ */
+export const WORKING_ANIMATION_TICK_MS = 50;
+export const ANIMATION_PREVIEW_TICK_MS = 50;
+export const ANIMATION_STATUS_EFFECT_TICK_MS = 100;
 export const ANIMATION_FRAME_TIME_SCALE = 1.25;
+
+/** Quantize motion sampling so incidental global renders do not churn ANSI. */
+export function quantizeAnimationElapsed(elapsed: number, tickMs: number = WORKING_ANIMATION_TICK_MS): number {
+  if (!Number.isFinite(elapsed) || elapsed <= 0) return 0;
+  return Math.floor(elapsed / Math.max(1, tickMs)) * Math.max(1, tickMs);
+}
 
 function spriteFrame(
   phase: AnimationPhase,
@@ -833,6 +843,7 @@ const ADVANCED_SPRITES: Partial<Record<WorkingAnimation, readonly AnimationFrame
  * remain deterministic.
  */
 const normalizedAnimationFramesCache = new WeakMap<readonly AnimationFrame[], readonly AnimationFrame[]>();
+const actionLoopFramesCache = new WeakMap<readonly AnimationFrame[], readonly AnimationFrame[]>();
 
 export function normalizeAnimationFrames(frames: readonly AnimationFrame[]): readonly AnimationFrame[] {
   const cached = normalizedAnimationFramesCache.get(frames);
@@ -851,17 +862,54 @@ export function normalizeAnimationFrames(frames: readonly AnimationFrame[]): rea
   return normalized;
 }
 
+/**
+ * Action phases must keep moving even when an animation author supplied only
+ * one action keyframe. Add one complete, already-normalized recovery pose from
+ * the nearest idle/enter/exit pose rather than interpolating rows (which would
+ * create hybrid or concealed sprites). The source frame remains first so the
+ * authored action always starts at the same point.
+ */
+function ensureActionLoop(frames: readonly AnimationFrame[]): readonly AnimationFrame[] {
+  const cached = actionLoopFramesCache.get(frames);
+  if (cached) return cached;
+  const action = frames.filter((frame) => frame.phase === "action");
+  const signatures = new Set(action.map((frame) => JSON.stringify(frame.lines)));
+  if (action.length >= 2 && signatures.size >= 2) {
+    actionLoopFramesCache.set(frames, frames);
+    return frames;
+  }
+  const source = action[0];
+  if (!source) {
+    actionLoopFramesCache.set(frames, frames);
+    return frames;
+  }
+  const recovery = frames.find((frame) => frame.phase !== "action" && !signatures.has(JSON.stringify(frame.lines)));
+  if (!recovery) {
+    actionLoopFramesCache.set(frames, frames);
+    return frames;
+  }
+  const loopFrame: AnimationFrame = {
+    ...recovery,
+    phase: "action",
+    duration: source.duration,
+    semantic: `${recovery.semantic ?? "recovery"}-action`,
+  };
+  const looped = [...frames, loopFrame];
+  actionLoopFramesCache.set(frames, looped);
+  return looped;
+}
+
 function animationFrames(animation: WorkingAnimation): readonly AnimationFrame[] {
   const dedicated = ADVANCED_SPRITES[animation];
-  if (dedicated) return normalizeAnimationFrames(dedicated);
+  if (dedicated) return ensureActionLoop(normalizeAnimationFrames(dedicated));
   const plain = (elapsed: number) => renderWorkingAnimation(animation, elapsed, { shade: (s) => s, pulseOffset: 0 });
-  return normalizeAnimationFrames([
+  return ensureActionLoop(normalizeAnimationFrames([
     spriteFrame("enter", 90, [`· ${plain(0)}`], `${animation}-enter`),
     spriteFrame("idle", 120, [plain(0)], `${animation}-idle-1`),
     spriteFrame("idle", 120, [plain(120)], `${animation}-idle-2`),
     spriteFrame("action", 90, [`‹${plain(180)}›`], `${animation}-action`),
     spriteFrame("exit", 100, [`${plain(240)} ·`], `${animation}-exit`),
-  ]);
+  ]));
 }
 
 export function getAnimationDefinition(animation: WorkingAnimation): AnimationDefinition {
@@ -965,7 +1013,9 @@ export function renderAdvancedAnimation(
   c: AnimColors,
   motionElapsed: number = elapsed,
 ): string[] {
-  return colorizeAnimationRows(selectAnimationRows(animation, elapsed, phase), c, motionElapsed);
+  const sampledElapsed = quantizeAnimationElapsed(elapsed);
+  const sampledMotionElapsed = quantizeAnimationElapsed(motionElapsed);
+  return colorizeAnimationRows(selectAnimationRows(animation, sampledElapsed, phase), c, sampledMotionElapsed);
 }
 
 /**
@@ -1378,29 +1428,30 @@ export function renderAnimationStatusText(
   const glyphs = splitGraphemes(clipGraphemesToWidth(text, maxWidth));
   const shader = createAccentShader(accentAnsi);
   const count = Math.max(1, glyphs.length);
-  const tick = Math.floor(Math.max(0, elapsed) / 50);
+  const effectElapsed = quantizeAnimationElapsed(elapsed, ANIMATION_STATUS_EFFECT_TICK_MS);
+  const tick = Math.floor(effectElapsed / ANIMATION_STATUS_EFFECT_TICK_MS);
   const mod = (value: number, base: number) => ((value % base) + base) % base;
   const beamDistance = (index: number, speed: number) => {
-    const beam = mod(Math.floor(Math.max(0, elapsed) / speed), count);
+    const beam = mod(Math.floor(effectElapsed / speed), count);
     const direct = Math.abs(index - beam);
     return Math.min(direct, count - direct);
   };
   const amountFor = (index: number): number => {
     switch (ANIMATION_TEXT_EFFECTS[animation]) {
-      case "ripple": return Math.round(15 + 55 * Math.sin(elapsed / 95 + index * 0.72));
+      case "ripple": return Math.round(15 + 55 * Math.sin(effectElapsed / 95 + index * 0.72));
       case "orbit": return beamDistance(index, 70) <= 1 ? 105 : -20;
       case "scan": return Math.max(-35, 110 - beamDistance(index, 45) * 45);
-      case "bounce": return Math.round(-20 + 90 * Math.abs(Math.sin(elapsed / 105 + index * 0.32)));
-      case "twinkle": return mod(index * 7 + tick, 6) === 0 ? 125 : Math.round(5 + 25 * Math.sin(index + elapsed / 180));
-      case "flutter": return Math.round(25 + 45 * Math.sin(elapsed / 80 + index * 1.35));
-      case "triad": return mod(index - Math.floor(elapsed / 160), 3) === 0 ? 110 : 5;
+      case "bounce": return Math.round(-20 + 90 * Math.abs(Math.sin(effectElapsed / 105 + index * 0.32)));
+      case "twinkle": return mod(index * 7 + tick, 6) === 0 ? 125 : Math.round(5 + 25 * Math.sin(index + effectElapsed / 180));
+      case "flutter": return Math.round(25 + 45 * Math.sin(effectElapsed / 80 + index * 1.35));
+      case "triad": return mod(index - Math.floor(effectElapsed / ANIMATION_STATUS_EFFECT_TICK_MS), 3) === 0 ? 110 : 5;
       case "streak": return Math.max(-30, 120 - beamDistance(index, 32) * 34);
-      case "pixel": return mod(index + Math.floor(elapsed / 110), 2) === 0 ? 75 : -20;
-      case "glow": return Math.round(30 + 55 * Math.sin(elapsed / 150) + 18 * Math.cos(index * 0.45));
+      case "pixel": return mod(index + Math.floor(effectElapsed / ANIMATION_STATUS_EFFECT_TICK_MS), 2) === 0 ? 75 : -20;
+      case "glow": return Math.round(30 + 55 * Math.sin(effectElapsed / 150) + 18 * Math.cos(index * 0.45));
       case "shadow": return beamDistance(index, 95) === 0 ? 95 : -45;
-      case "flicker": return Math.round(35 + 45 * Math.sin(elapsed / 52 + index * 2.1) + 25 * Math.sin(elapsed / 91 + index));
-      case "segment": return mod(Math.floor(index / 3) - Math.floor(elapsed / 120), 4) === 0 ? 105 : 0;
-      case "goo": return Math.round(20 + 48 * Math.sin(elapsed / 135 + index * 0.48));
+      case "flicker": return Math.round(35 + 45 * Math.sin(effectElapsed / 52 + index * 2.1) + 25 * Math.sin(effectElapsed / 91 + index));
+      case "segment": return mod(Math.floor(index / 3) - Math.floor(effectElapsed / ANIMATION_STATUS_EFFECT_TICK_MS), 4) === 0 ? 105 : 0;
+      case "goo": return Math.round(20 + 48 * Math.sin(effectElapsed / 135 + index * 0.48));
     }
   };
   return glyphs.map((glyph, index) => /\s/u.test(glyph)
@@ -1422,10 +1473,13 @@ export function renderAdvancedWorkingWidgetLines(
 ): string[] {
   if (runtime.selected === "off" || width <= 0) return [];
   const phase = transitionAnimationPhase(runtime, !idle, toolName, now);
-  const phaseElapsed = Math.max(0, now - (runtime.phaseStartedAt ?? now));
+  const phaseAge = Math.max(0, now - (runtime.phaseStartedAt ?? now));
+  // Keep complete poses byte-identical between the 20 FPS render opportunities;
+  // lifecycle transitions still use the unquantized age for finite clamping.
+  const phaseElapsed = quantizeAnimationElapsed(phaseAge);
   if (idle && phase === "idle") return [];
   const exitDuration = Math.max(1, animationPhaseDuration(runtime.resolved, "exit"));
-  if (idle && phase === "exit" && phaseElapsed >= exitDuration) {
+  if (idle && phase === "exit" && phaseAge >= exitDuration) {
     runtime.phase = "idle";
     runtime.phaseStartedAt = now;
     return [];
@@ -1469,7 +1523,7 @@ export function renderAdvancedWorkingWidgetLines(
     const text = renderAnimationStatusText(
       runtime.resolved,
       expression,
-      Math.floor(statusElapsed * 0.65),
+      statusElapsed,
       accentAnsi,
       expressionBudget,
     );
@@ -1479,7 +1533,7 @@ export function renderAdvancedWorkingWidgetLines(
   const output = body.map((line) => ansiSafeLine(line, width));
   const statusText = toolName ? `${toolName}: ${expression}` : expression;
   output.push(ansiSafeLine(
-    renderAnimationStatusText(runtime.resolved, statusText, Math.floor(statusElapsed * 0.65), accentAnsi, width),
+    renderAnimationStatusText(runtime.resolved, statusText, statusElapsed, accentAnsi, width),
     width,
   ));
   return output;
@@ -1515,8 +1569,9 @@ export function renderWorkingWidgetLines(
     expression = THINKING_EXPRESSIONS[runtime.expressionIndex];
   }
 
-  const thinkOffset = Math.round(Math.sin(now / 120) * 75);
-  const fullGlyphs = renderWorkingAnimation(runtime.resolved, now - runtime.startedAt, {
+  const motionElapsed = quantizeAnimationElapsed(Math.max(0, now - runtime.startedAt));
+  const thinkOffset = Math.round(Math.sin(motionElapsed / 120) * 75);
+  const fullGlyphs = renderWorkingAnimation(runtime.resolved, motionElapsed, {
     shade: (text, amount) => shadeFgAnsi(accentAnsi, amount, text),
     pulseOffset: thinkOffset,
   });
@@ -1662,7 +1717,13 @@ export class AnimationPreviewMenu {
       shade: createAccentShader(this.theme.getFgAnsi("accent")),
       pulseOffset: 0,
     };
-    const lines = renderAdvancedAnimation(resolved, moment.elapsed, moment.phase, colors, elapsed);
+    const lines = renderAdvancedAnimation(
+      resolved,
+      quantizeAnimationElapsed(moment.elapsed),
+      moment.phase,
+      colors,
+      quantizeAnimationElapsed(elapsed),
+    );
     return { resolved, moment, lines };
   }
 
@@ -1683,7 +1744,7 @@ export class AnimationPreviewMenu {
     const sampleStatus = renderAnimationStatusText(
       resolved,
       "thinking hard...",
-      Math.floor(elapsed / ANIMATION_STATUS_EFFECT_TICK_MS) * ANIMATION_STATUS_EFFECT_TICK_MS * 0.65,
+      Math.floor(elapsed / ANIMATION_STATUS_EFFECT_TICK_MS) * ANIMATION_STATUS_EFFECT_TICK_MS,
       this.theme.getFgAnsi("accent"),
       Math.max(0, width - 2),
     );

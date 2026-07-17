@@ -37,6 +37,7 @@ import installInputRevamp, {
   selectAnimationFrame,
   sampleAnimationFrameTransition,
   animationPhaseDuration,
+  quantizeAnimationElapsed,
   visibleElementIds,
   type AnimationRuntime,
 } from "../extensions/index.ts";
@@ -171,13 +172,30 @@ test("advanced sprite rows share one centered canvas across every frame and phas
 });
 
 test("animation cadence keeps refresh smooth while full-sprite poses remain gentle", () => {
-  assert.equal(WORKING_ANIMATION_TICK_MS, 100);
-  assert.equal(ANIMATION_PREVIEW_TICK_MS, 100);
-  assert.equal(ANIMATION_STATUS_EFFECT_TICK_MS, 250);
+  assert.equal(WORKING_ANIMATION_TICK_MS, 50);
+  assert.equal(ANIMATION_PREVIEW_TICK_MS, 50);
+  assert.equal(ANIMATION_STATUS_EFFECT_TICK_MS, 100);
   assert.equal(ANIMATION_FRAME_TIME_SCALE, 1.25);
+  assert.equal(quantizeAnimationElapsed(49), 0);
+  assert.equal(quantizeAnimationElapsed(50), 50);
+  assert.equal(quantizeAnimationElapsed(149), 100);
   for (const animation of WORKING_ANIMATIONS) {
     const durations = getAnimationDefinition(animation).frames.map((frame) => frame.duration);
     assert.ok(Math.max(...durations) <= 238, `${animation} retained an excessive ${Math.max(...durations)}ms frame hold`);
+  }
+});
+
+test("every action phase loops complete distinct poses without skipping at 50ms cadence", () => {
+  for (const animation of WORKING_ANIMATIONS) {
+    const actionFrames = getAnimationDefinition(animation).frames.filter((frame) => frame.phase === "action");
+    assert.ok(actionFrames.length >= 2, `${animation} action phase has only one pose`);
+    assert.ok(new Set(actionFrames.map((frame) => JSON.stringify(frame.lines))).size >= 2, `${animation} action poses are not distinct`);
+    const total = animationPhaseDuration(animation, "action");
+    const sampled = new Set<string>();
+    for (let elapsed = 0; elapsed < total; elapsed += WORKING_ANIMATION_TICK_MS) {
+      sampled.add(selectAnimationFrame(animation, elapsed, "action").semantic ?? "");
+    }
+    assert.ok(sampled.size >= 2, `${animation} skipped an action pose at 50ms cadence`);
   }
 });
 
@@ -192,7 +210,7 @@ test("held poses are raw-byte stable across incidental global renders", () => {
   const samples = Array.from({ length: 30 }, (_unused, index) =>
     renderAdvancedWorkingWidgetLines(runtime, false, null, 80, accent, 1_000 + index * 33).join("\n"));
   const changes = samples.slice(1).filter((sample, index) => sample !== samples[index]).length;
-  assert.ok(changes <= 10, `widget churned on ${changes}/29 incidental renders`);
+  assert.ok(changes <= 20, `widget churned on ${changes}/29 incidental renders`);
 
   const menu = new AnimationPreviewMenu(
     { requestRender() {} } as any,
@@ -205,6 +223,15 @@ test("held poses are raw-byte stable across incidental global renders", () => {
   assert.deepEqual((menu as any).previewSprite("slime", 33).lines, preview0);
   assert.deepEqual((menu as any).previewSprite("slime", 66).lines, preview0);
   menu.dispose();
+});
+
+test("status text effects quantize to 100ms and stay byte-stable between ticks", () => {
+  for (const animation of WORKING_ANIMATIONS) {
+    const at0 = renderAnimationStatusText(animation, "thinking hard...", 0, accent);
+    assert.equal(renderAnimationStatusText(animation, "thinking hard...", 1, accent), at0, `${animation} churned at 1ms`);
+    assert.equal(renderAnimationStatusText(animation, "thinking hard...", 99, accent), at0, `${animation} churned before 100ms`);
+    assert.notEqual(renderAnimationStatusText(animation, "thinking hard...", 100, accent), at0, `${animation} missed its 100ms tick`);
+  }
 });
 
 test("session metrics cache refreshes on TTL and forced agent completion", () => {
@@ -230,6 +257,18 @@ test("session metrics cache refreshes on TTL and forced agent completion", () =>
   const refreshed = refreshSessionStatsSnapshot(forced, 2_100, getEntries);
   assert.notEqual(refreshed, forced);
   assert.equal(scans, 3);
+});
+
+test("bounded 20 FPS widget rendering avoids old every-line repaint churn", () => {
+  const runtime: AnimationRuntime = {
+    selected: "slime", resolved: "slime", startedAt: 1_000, expressionIndex: 0, expressionChangedAt: 1_000,
+  };
+  const samples = Array.from({ length: 80 }, (_unused, index) =>
+    renderAdvancedWorkingWidgetLines(runtime, false, "bash", 80, accent, 1_000 + index * 10).join("\\n"));
+  const changes = samples.slice(1).filter((sample, index) => sample !== samples[index]).length;
+  // Rendering may be requested more often than the 50ms timer, but output only
+  // changes on a bounded cadence instead of rewriting on every incidental pass.
+  assert.ok(changes <= 20, `widget changed on ${changes}/79 incidental renders`);
 });
 
 test("advanced sprites always render stable full poses without conceal or hybrid rows", () => {
