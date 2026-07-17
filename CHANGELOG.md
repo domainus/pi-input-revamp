@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Selectable working animations: `wave`, `orbit`, `scanner`, `bounce`, and
+  `sparkle`.
+- `/input-settings` TUI for changing and persisting the working animation.
+- `random` working-animation mode, resolved once for every Pi session.
+
 ## [1.2.0] - 2026-06-30
 
 ### Added

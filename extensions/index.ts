@@ -29,9 +29,9 @@
  *       "bottomRight": ["turn", "ext:pi-quotas-usage", "turn-cost"]
  */
 
-import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, getSettingsListTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, type SettingItem, SettingsList, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
@@ -54,6 +54,10 @@ type BuiltinElementId =
  */
 type ElementId = BuiltinElementId | `ext:${string}`;
 
+const WORKING_ANIMATIONS = ["wave", "orbit", "scanner", "bounce", "sparkle"] as const;
+type WorkingAnimation = typeof WORKING_ANIMATIONS[number];
+type WorkingAnimationChoice = WorkingAnimation | "random";
+
 interface InputRevampConfig {
   layout: {
     topLeft: ElementId[];
@@ -66,6 +70,9 @@ interface InputRevampConfig {
     submitFlash: boolean;
     metricPulse: boolean;
     tokPulse: boolean;
+    working: WorkingAnimationChoice;
+    /** Internal history used to prevent random mode repeating across processes. */
+    lastWorking?: WorkingAnimation;
   };
 }
 
@@ -81,8 +88,22 @@ const DEFAULT_CONFIG: InputRevampConfig = {
     submitFlash: true,
     metricPulse: true,
     tokPulse: true,
+    working: "wave",
   },
 };
+
+function isWorkingAnimation(value: unknown): value is WorkingAnimation {
+  return WORKING_ANIMATIONS.includes(value as WorkingAnimation);
+}
+
+function isWorkingAnimationChoice(value: unknown): value is WorkingAnimationChoice {
+  return value === "random" || isWorkingAnimation(value);
+}
+
+function configPath(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  return `${home}/.pi/pi-input-revamp.json`;
+}
 
 function writeDefaultConfig(path: string): void {
   try {
@@ -96,10 +117,9 @@ function writeDefaultConfig(path: string): void {
 
 function loadConfig(): InputRevampConfig {
   try {
-    const home = process.env.HOME || process.env.USERPROFILE || "";
-    const configPath = `${home}/.pi/pi-input-revamp.json`;
-    if (existsSync(configPath)) {
-      const raw = readFileSync(configPath, "utf8");
+    const path = configPath();
+    if (existsSync(path)) {
+      const raw = readFileSync(path, "utf8");
       const parsed = JSON.parse(raw) as Partial<InputRevampConfig>;
       // Merge with defaults so missing fields fall back
       return {
@@ -126,12 +146,18 @@ function loadConfig(): InputRevampConfig {
             parsed.animations?.metricPulse ?? DEFAULT_CONFIG.animations.metricPulse,
           tokPulse:
             parsed.animations?.tokPulse ?? DEFAULT_CONFIG.animations.tokPulse,
+          working: isWorkingAnimationChoice(parsed.animations?.working)
+            ? parsed.animations.working
+            : DEFAULT_CONFIG.animations.working,
+          ...(isWorkingAnimation(parsed.animations?.lastWorking)
+            ? { lastWorking: parsed.animations.lastWorking }
+            : {}),
         },
       };
     }
 
     // File doesn't exist → create it with defaults, then return defaults
-    writeDefaultConfig(configPath);
+    writeDefaultConfig(path);
   } catch {
     // Silently fall back to defaults
   }
@@ -140,6 +166,25 @@ function loadConfig(): InputRevampConfig {
     layout: { ...DEFAULT_CONFIG.layout },
     animations: { ...DEFAULT_CONFIG.animations },
   };
+}
+
+function saveConfig(config: InputRevampConfig): boolean {
+  try {
+    const path = configPath();
+    mkdirSync(path.substring(0, path.lastIndexOf("/")), { recursive: true });
+    writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pickWorkingAnimation(choice: WorkingAnimationChoice, previous?: WorkingAnimation): WorkingAnimation {
+  if (choice !== "random") return choice;
+  const pool = previous && WORKING_ANIMATIONS.length > 1
+    ? WORKING_ANIMATIONS.filter((animation) => animation !== previous)
+    : [...WORKING_ANIMATIONS];
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 // ── Tools actually sent on the wire ───────────────────────
@@ -217,6 +262,33 @@ const THINKING_EXPRESSIONS = [
   "crunching numbers...",
   "stirring its circuits...",
   "shuffling tokens...",
+  "connecting the dots...",
+  "untangling the logic...",
+  "assembling the pieces...",
+  "chasing down the details...",
+  "mapping the possibilities...",
+  "checking every angle...",
+  "warming up the synapses...",
+  "polishing the response...",
+  "consulting the silicon oracle...",
+  "following the signal...",
+  "sorting through the noise...",
+  "lining up the answer...",
+  "giving it one more thought...",
+  "consulting a rubber duck...",
+  "turning it off and on again...",
+  "blaming the cache...",
+  "checking if it's DNS...",
+  "bribing the compiler...",
+  "herding semicolons...",
+  "feeding the token gremlins...",
+  "shaking the magic 8-ball...",
+  "making the bugs nervous...",
+  "convincing electrons to cooperate...",
+  "pretending this is deterministic...",
+  "adding one more abstraction...",
+  "recalculating the vibes...",
+  "definitely not overthinking...",
 ];
 
 /** Last tool currently executing (read by the editor). */
@@ -499,6 +571,61 @@ function lerpToWhite(baseAnsi: string, t: number, text: string): string {
   return `${open}${text}\x1b[39m`;
 }
 
+/** Animated rainbow wave used by the "dynamic workflow" easter egg. */
+function rainbowWaveText(text: string, elapsed: number, baseAnsi: string, indexOffset = 0): string {
+  const mode = parseFgAnsi(baseAnsi)?.mode ?? "truecolor";
+  return [...text].map((char, index) => {
+    if (char === " ") return char;
+    const hue = ((elapsed / 9) + (index + indexOffset) * 24) % 360;
+    const channel = (offset: number) => Math.round(128 + 127 * Math.sin((hue + offset) * Math.PI / 180));
+    const [r, g, b] = [channel(0), channel(120), channel(240)];
+    const open = mode === "truecolor"
+      ? `\x1b[38;2;${r};${g};${b}m`
+      : `\x1b[38;5;${rgbTo256(r, g, b)}m`;
+    return `${open}${char}`;
+  }).join("") + "\x1b[39m";
+}
+
+export type TextRange = Readonly<{ start: number; end: number }>;
+const DYNAMIC_WORD_CHAR = "[\\p{L}\\p{N}\\p{M}\\p{Pc}]";
+const DYNAMIC_WORKFLOW_TEST = new RegExp(`(?<!${DYNAMIC_WORD_CHAR})dynamic\\s+workflows?(?!${DYNAMIC_WORD_CHAR})`, "iu");
+const DYNAMIC_WORKFLOW_RANGES = new RegExp(`(?<!${DYNAMIC_WORD_CHAR})dynamic\\s+workflows?(?!${DYNAMIC_WORD_CHAR})`, "giu");
+
+export function dynamicWorkflowMatches(text: string): boolean {
+  return DYNAMIC_WORKFLOW_TEST.test(text);
+}
+
+export function dynamicWorkflowRanges(text: string): TextRange[] {
+  return [...text.matchAll(DYNAMIC_WORKFLOW_RANGES)].map((match) => ({
+    start: match.index ?? 0,
+    end: (match.index ?? 0) + match[0].length,
+  }));
+}
+
+/** Colors only the portions of a rendered source slice covered by full-text phrase matches. */
+export function rainbowWorkflowSlice(
+  text: string,
+  sourceOffset: number,
+  ranges: readonly TextRange[],
+  elapsed: number,
+  baseAnsi: string,
+): string {
+  let output = "";
+  let localOffset = 0;
+  const sliceEnd = sourceOffset + text.length;
+  for (const range of ranges) {
+    const overlapStart = Math.max(sourceOffset, range.start);
+    const overlapEnd = Math.min(sliceEnd, range.end);
+    if (overlapStart >= overlapEnd) continue;
+    const localStart = overlapStart - sourceOffset;
+    const localEnd = overlapEnd - sourceOffset;
+    output += text.slice(localOffset, localStart);
+    output += rainbowWaveText(text.slice(localStart, localEnd), elapsed, baseAnsi, overlapStart - range.start);
+    localOffset = localEnd;
+  }
+  return output + text.slice(localOffset);
+}
+
 interface AnimColors {
   /** accent lightened (amount>0) or darkened (amount<0) by `amount` per RGB channel */
   shade: (s: string, amount: number) => string;
@@ -522,12 +649,51 @@ function renderThinkingGlyphs(elapsed: number, c: AnimColors): string {
   return out;
 }
 
+function renderWorkingAnimation(animation: WorkingAnimation, elapsed: number, c: AnimColors): string {
+  if (animation === "wave") return renderThinkingGlyphs(elapsed, c);
+
+  if (animation === "orbit") {
+    const frames = ["◜", "◝", "◞", "◟"];
+    const frame = frames[Math.floor(elapsed / 110) % frames.length];
+    return `${c.shade("◉", 65 + c.pulseOffset)}${c.shade(frame, 20 + c.pulseOffset)}${c.shade("·", -20 + c.pulseOffset)}`;
+  }
+
+  if (animation === "scanner") {
+    const width = 7;
+    const cycle = (width - 1) * 2;
+    const step = Math.floor(elapsed / 85) % cycle;
+    const position = step < width ? step : cycle - step;
+    return Array.from({ length: width }, (_, index) => c.shade(index === position ? "●" : "─", index === position ? 90 : -35)).join("");
+  }
+
+  if (animation === "bounce") {
+    const width = 7;
+    const cycle = (width - 1) * 2;
+    const step = Math.floor(elapsed / 100) % cycle;
+    const position = step < width ? step : cycle - step;
+    return Array.from({ length: width }, (_, index) => index === position ? c.shade("◆", 90 + c.pulseOffset) : " ").join("");
+  }
+
+  const sparkles = ["·", "✦", "*", "⋆", "·"];
+  const phase = Math.floor(elapsed / 120);
+  return sparkles.map((glyph, index) => {
+    const active = (index + phase) % sparkles.length;
+    return c.shade(active < 2 ? glyph : "·", active < 2 ? 85 - active * 25 : -40);
+  }).join("");
+}
+
 // ── Custom editor ─────────────────────────────────────────
+
+interface AnimationRuntime {
+  selected: WorkingAnimationChoice;
+  resolved: WorkingAnimation;
+}
 
 interface EditorContext {
   pi: ExtensionAPI;
   ctx: Record<string, any>;
   config: InputRevampConfig;
+  animationRuntime: AnimationRuntime;
 }
 
 /** Read-only context passed to every element renderer. */
@@ -568,9 +734,13 @@ class NerismaInputEditor extends CustomEditor {
   private config: InputRevampConfig;
   private _thinkingTimer: ReturnType<typeof setInterval> | undefined;
   private _inputTimer: ReturnType<typeof setInterval> | undefined;
+  private _dynamicWorkflowTimer: ReturnType<typeof setInterval> | undefined;
+  private _dynamicWorkflowStartedAt: number = 0;
   private _wasThinking: boolean = false;
   private _wasPulsing: boolean = false;
   private _animStart: number = 0;
+  private _thinkingExpressionIndex: number = -1;
+  private _thinkingExpressionChangedAt: number = 0;
   private _lastInputText: string = "";
   /** Recent typing events (timestamp + number of characters added) to estimate WPM. */
   private _keyEvents: { t: number; n: number }[] = [];
@@ -644,6 +814,7 @@ class NerismaInputEditor extends CustomEditor {
     this._stopMetricAnimation();
     this._stopSubmitAnimation();
     this._stopTokAnimation();
+    this._stopDynamicWorkflowAnimation();
     this._stopStatusPolling();
   }
 
@@ -678,6 +849,8 @@ class NerismaInputEditor extends CustomEditor {
   private _startThinkingAnimation() {
     if (this._thinkingTimer) return;
     this._animStart = Date.now();
+    this._thinkingExpressionIndex = -1;
+    this._thinkingExpressionChangedAt = 0;
     this._thinkingTimer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* editor may be detached */ }
     }, 50);
@@ -702,6 +875,22 @@ class NerismaInputEditor extends CustomEditor {
       clearInterval(this._inputTimer);
       this._inputTimer = undefined;
     }
+  }
+
+  private _startDynamicWorkflowAnimation() {
+    if (this._dynamicWorkflowTimer) return;
+    this._dynamicWorkflowStartedAt = Date.now();
+    this._dynamicWorkflowTimer = setInterval(() => {
+      try { this.tui.requestRender(); } catch { /* editor may be detached */ }
+    }, 50);
+  }
+
+  private _stopDynamicWorkflowAnimation() {
+    if (this._dynamicWorkflowTimer) {
+      clearInterval(this._dynamicWorkflowTimer);
+      this._dynamicWorkflowTimer = undefined;
+    }
+    this._dynamicWorkflowStartedAt = 0;
   }
 
   private _stopMetricAnimation() {
@@ -995,10 +1184,23 @@ class NerismaInputEditor extends CustomEditor {
       }
     }
 
+    // Easter egg: keep the phrase and frame moving while the exact words are
+    // present in the editor (case-insensitive and tolerant of extra whitespace).
+    const dynamicWorkflowActive = dynamicWorkflowMatches(currentText);
+    if (dynamicWorkflowActive && !this._dynamicWorkflowTimer) {
+      this._startDynamicWorkflowAnimation();
+    } else if (!dynamicWorkflowActive && this._dynamicWorkflowTimer) {
+      this._stopDynamicWorkflowAnimation();
+    }
+
     // Submit pulse (only if enabled)
     const submitT = configAnim.submitFlash ? this._submitPulse : 0;
     borderT = Math.max(borderT, submitT);
+    // One shared phase drives every edge and corner, keeping the complete frame
+    // perfectly synchronized instead of animating only the footer.
+    const workflowBreathOffset = Math.round(50 + Math.sin(now / 110) * 65);
     const borderColorFn = (s: string) => {
+      if (dynamicWorkflowActive) return shadeFgAnsi(accentAnsi, workflowBreathOffset, s);
       if (borderT > 0.001) return lerpToWhite(accentAnsi, borderT, s);
       return accent(s);
     };
@@ -1130,16 +1332,26 @@ class NerismaInputEditor extends CustomEditor {
       if (activeToolName) {
         expression = DEFAULT_TOOL_EXPRESSION;
       } else {
-        expression = THINKING_EXPRESSIONS[Math.abs(Math.floor(elapsed / 2000)) % THINKING_EXPRESSIONS.length];
+        if (this._thinkingExpressionIndex < 0 || now - this._thinkingExpressionChangedAt >= 10_000) {
+          const previous = this._thinkingExpressionIndex;
+          let next = Math.floor(Math.random() * THINKING_EXPRESSIONS.length);
+          if (THINKING_EXPRESSIONS.length > 1 && next === previous) {
+            next = (next + 1 + Math.floor(Math.random() * (THINKING_EXPRESSIONS.length - 1)))
+              % THINKING_EXPRESSIONS.length;
+          }
+          this._thinkingExpressionIndex = next;
+          this._thinkingExpressionChangedAt = now;
+        }
+        expression = THINKING_EXPRESSIONS[this._thinkingExpressionIndex];
       }
       const thinkOffset = Math.round(Math.sin(now / 120) * 75);
       const thinkColor = (s: string) => shadeFgAnsi(accentAnsi, thinkOffset, s);
       const wordStr = ` ${thinkColor(expression)}`;
-      const glyphs = renderThinkingGlyphs(elapsed, {
+      const glyphs = renderWorkingAnimation(this.ext.animationRuntime.resolved, elapsed, {
         shade: (s, amount) => shadeFgAnsi(accentAnsi, amount, s),
         pulseOffset: thinkOffset,
       });
-      const animLine = ` ${glyphs}${wordStr}`;
+      const animLine = truncateToWidth(` ${glyphs}${wordStr}`, Math.max(0, width), "");
       const animWidth = visibleWidth(animLine);
       const pad = Math.max(0, width - animWidth);
       result.push(animLine + " ".repeat(pad));
@@ -1175,24 +1387,41 @@ class NerismaInputEditor extends CustomEditor {
     (this as any).lastWidth = layoutWidth;
 
     const layoutLines = (this as any).layoutText(layoutWidth);
+    const visualLineMap = (this as any).buildVisualLineMap(layoutWidth) as Array<{ logicalLine: number; startCol: number }>;
+    const sourceLines = this.getLines();
+    const logicalLineOffsets: number[] = [];
+    let logicalOffset = 0;
+    for (const line of sourceLines) {
+      logicalLineOffsets.push(logicalOffset);
+      logicalOffset += line.length + 1; // Include the newline between logical lines.
+    }
+    const workflowRanges = dynamicWorkflowActive ? dynamicWorkflowRanges(currentText) : [];
+    const workflowElapsed = now - this._dynamicWorkflowStartedAt;
     const maxTextWidth = innerWidth - promptWidth;
 
     for (let i = 0; i < layoutLines.length; i++) {
       const ll = layoutLines[i];
-      let displayText = ll.text;
+      const visualLine = visualLineMap[i];
+      const sourceOffset = (logicalLineOffsets[visualLine?.logicalLine ?? 0] ?? 0) + (visualLine?.startCol ?? 0);
+      const styleSlice = (text: string, sliceOffset: number) => rainbowWorkflowSlice(
+        text, sourceOffset + sliceOffset, workflowRanges, workflowElapsed, accentAnsi,
+      );
+      let displayText = styleSlice(ll.text, 0);
       let lineWidth = visibleWidth(ll.text);
 
       if (ll.hasCursor && ll.cursorPos !== undefined) {
-        const before = displayText.slice(0, ll.cursorPos);
-        const after = displayText.slice(ll.cursorPos);
+        const before = ll.text.slice(0, ll.cursorPos);
+        const after = ll.text.slice(ll.cursorPos);
 
         if (after.length > 0) {
           const segs = [...(this as any).segment(after, "grapheme")];
           const firstG = segs[0]?.segment || "";
           const rest = after.slice(firstG.length);
-          displayText = before + `\x1b[7m${firstG}\x1b[0m` + rest;
+          displayText = styleSlice(before, 0)
+            + `\x1b[7m${styleSlice(firstG, ll.cursorPos)}\x1b[0m`
+            + styleSlice(rest, ll.cursorPos + firstG.length);
         } else {
-          displayText = before + "\x1b[7m \x1b[0m";
+          displayText = styleSlice(before, 0) + "\x1b[7m \x1b[0m";
           lineWidth += 1;
         }
       }
@@ -1238,7 +1467,8 @@ class NerismaInputEditor extends CustomEditor {
     const bottomLeftStr = bottomLeftText.length > 0 ? ` ${bottomLeftText} ` : "";
     const bottomRightStr = bottomRightText.length > 0 ? ` ${bottomRightText} ` : "";
 
-    // Bottom line: ╰─...─╯
+    // Bottom line: ╰─...─╯. It uses the same borderColorFn as the top and sides,
+    // so the entire frame breathes on one shared animation phase.
     // fitRoundedBorder puts left on the left and right on the right.
     // The bottom-left text goes to the left side of the bottom border.
     result.push(fitRoundedBorder(bottomLeftStr, bottomRightStr, width, borderColorFn, false));
@@ -1252,6 +1482,60 @@ class NerismaInputEditor extends CustomEditor {
 export default function (pi: ExtensionAPI): void {
   let registered = false;
   const config = loadConfig();
+  const animationRuntime: AnimationRuntime = {
+    selected: config.animations.working,
+    resolved: pickWorkingAnimation(config.animations.working, config.animations.lastWorking),
+  };
+
+  pi.registerCommand("input-settings", {
+    description: "Configure the revamped input editor",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("/input-settings requires TUI mode", "error");
+        return;
+      }
+
+      await ctx.ui.custom((_tui, theme, _keybindings, done) => {
+        const container = new Container();
+        container.addChild(new Text(theme.fg("accent", theme.bold("Input Animation Settings")), 1, 1));
+
+        const items: SettingItem[] = [{
+          id: "working-animation",
+          label: "Working animation",
+          description: "Animation shown while the agent works. Random chooses once at the start of every Pi session.",
+          currentValue: animationRuntime.selected,
+          values: [...WORKING_ANIMATIONS, "random"],
+        }];
+        const settingsList = new SettingsList(
+          items,
+          6,
+          getSettingsListTheme(),
+          (_id, newValue) => {
+            if (!isWorkingAnimationChoice(newValue)) return;
+            animationRuntime.selected = newValue;
+            animationRuntime.resolved = pickWorkingAnimation(
+              newValue,
+              config.animations.lastWorking ?? animationRuntime.resolved,
+            );
+            config.animations.working = newValue;
+            if (newValue === "random") config.animations.lastWorking = animationRuntime.resolved;
+            if (!saveConfig(config)) ctx.ui.notify("Could not save input animation settings", "error");
+          },
+          () => done(undefined),
+        );
+        container.addChild(settingsList);
+
+        return {
+          render(width: number) { return container.render(width); },
+          invalidate() { container.invalidate(); },
+          handleInput(data: string) {
+            settingsList.handleInput?.(data);
+            _tui.requestRender();
+          },
+        };
+      });
+    },
+  });
 
   // Capture (by reference) the tools array packed into each provider request,
   // so the UI can report exactly what was sent.
@@ -1260,6 +1544,16 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", (_event, ctx) => {
+    // Resolve random once per session, never per render or per working turn.
+    animationRuntime.selected = config.animations.working;
+    animationRuntime.resolved = pickWorkingAnimation(
+      animationRuntime.selected,
+      config.animations.lastWorking ?? animationRuntime.resolved,
+    );
+    if (animationRuntime.selected === "random") {
+      config.animations.lastWorking = animationRuntime.resolved;
+      saveConfig(config);
+    }
     if (registered) return;
     registered = true;
 
@@ -1277,7 +1571,7 @@ export default function (pi: ExtensionAPI): void {
     });
 
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      return new NerismaInputEditor(tui, theme, keybindings, { pi, ctx, config });
+      return new NerismaInputEditor(tui, theme, keybindings, { pi, ctx, config, animationRuntime });
     });
   });
 

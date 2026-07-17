@@ -50,7 +50,8 @@ fall back to the defaults, and changes are picked up on the next pi restart.
     "typingPulse": true,
     "submitFlash": true,
     "metricPulse": true,
-    "tokPulse": true
+    "tokPulse": true,
+    "working": "wave"
   }
 }
 ```
@@ -129,8 +130,12 @@ Each effect can be toggled independently under `animations`:
 | `submitFlash` | Brief white border pulse when you submit (text goes non-empty → empty) |
 | `metricPulse` | Metric text pulses toward white when its value changes                |
 | `tokPulse`    | The `~N tok` counter pulses each time the estimate updates            |
+| `working`     | Working indicator: `wave`, `orbit`, `scanner`, `bounce`, `sparkle`, or `random` |
 
-The thinking equalizer (the `▁▂▃…█` bar shown while the model works) is always on.
+Run `/input-settings` to change the working animation interactively. The choice is
+saved to `~/.pi/pi-input-revamp.json` and applies immediately. `random` chooses
+a fresh session-local animation once when each Pi session starts and remembers the
+last resolved choice so consecutive sessions do not repeat it.
 
 ## How it works
 
