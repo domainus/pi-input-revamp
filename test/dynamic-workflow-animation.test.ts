@@ -8,6 +8,7 @@ import installInputRevamp, {
   AnimationPreviewMenu,
   ANIMATION_PREVIEW_CYCLE_MS,
   ANIMATION_PREVIEW_TICK_MS,
+  ANIMATION_STATUS_EFFECT_TICK_MS,
   ANIMATION_FRAME_TIME_SCALE,
   WORKING_ANIMATION_TICK_MS,
   ANIMATION_TEXT_EFFECTS,
@@ -24,6 +25,7 @@ import installInputRevamp, {
   mergeInputRevampConfig,
   pickWorkingAnimation,
   rainbowWorkflowSlice,
+  refreshSessionStatsSnapshot,
   renderWorkingAnimation,
   renderWorkingWidgetLines,
   renderAdvancedAnimation,
@@ -134,13 +136,65 @@ test("advanced definitions select variable-duration phase frames and preserve sl
 });
 
 test("animation cadence keeps refresh smooth while full-sprite poses remain gentle", () => {
-  assert.equal(WORKING_ANIMATION_TICK_MS, 33);
-  assert.equal(ANIMATION_PREVIEW_TICK_MS, 33);
+  assert.equal(WORKING_ANIMATION_TICK_MS, 100);
+  assert.equal(ANIMATION_PREVIEW_TICK_MS, 100);
+  assert.equal(ANIMATION_STATUS_EFFECT_TICK_MS, 250);
   assert.equal(ANIMATION_FRAME_TIME_SCALE, 1.25);
   for (const animation of WORKING_ANIMATIONS) {
     const durations = getAnimationDefinition(animation).frames.map((frame) => frame.duration);
     assert.ok(Math.max(...durations) <= 238, `${animation} retained an excessive ${Math.max(...durations)}ms frame hold`);
   }
+});
+
+test("held poses are raw-byte stable across incidental global renders", () => {
+  const runtime: AnimationRuntime = {
+    selected: "slime", resolved: "slime", startedAt: 1_000, expressionIndex: 0, expressionChangedAt: 1_000,
+  };
+  const first = renderAdvancedWorkingWidgetLines(runtime, false, null, 80, accent, 1_000);
+  assert.deepEqual(renderAdvancedWorkingWidgetLines(runtime, false, null, 80, accent, 1_033), first);
+  assert.deepEqual(renderAdvancedWorkingWidgetLines(runtime, false, null, 80, accent, 1_066), first);
+
+  const samples = Array.from({ length: 30 }, (_unused, index) =>
+    renderAdvancedWorkingWidgetLines(runtime, false, null, 80, accent, 1_000 + index * 33).join("\n"));
+  const changes = samples.slice(1).filter((sample, index) => sample !== samples[index]).length;
+  assert.ok(changes <= 10, `widget churned on ${changes}/29 incidental renders`);
+
+  const menu = new AnimationPreviewMenu(
+    { requestRender() {} } as any,
+    { fg: (_key: string, text: string) => text, bold: (text: string) => text, getFgAnsi: () => accent },
+    { matches() { return false; } } as any,
+    "slime",
+    () => {},
+  );
+  const preview0 = (menu as any).previewSprite("slime", 0).lines;
+  assert.deepEqual((menu as any).previewSprite("slime", 33).lines, preview0);
+  assert.deepEqual((menu as any).previewSprite("slime", 66).lines, preview0);
+  menu.dispose();
+});
+
+test("session metrics cache refreshes on TTL and forced agent completion", () => {
+  let scans = 0;
+  let entries: readonly any[] = [];
+  const getEntries = () => { scans += 1; return entries; };
+  const first = refreshSessionStatsSnapshot(undefined, 1_000, getEntries);
+  assert.equal(first.sessionInfo.sessionStartTs, 0, "empty session invented a moving start timestamp");
+  assert.equal(refreshSessionStatsSnapshot(first, 1_033, getEntries), first);
+  assert.equal(refreshSessionStatsSnapshot(first, 1_999, getEntries), first);
+
+  entries = [
+    { type: "message", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user" } },
+    {
+      type: "message",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      message: { role: "assistant", usage: { input: 5, output: 7, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } } },
+    },
+  ];
+  const forced = refreshSessionStatsSnapshot(first, 1_100, getEntries, true);
+  assert.notEqual(forced, first);
+  assert.equal(forced.metrics?.output, 7, "forced completion refresh missed final assistant metrics");
+  const refreshed = refreshSessionStatsSnapshot(forced, 2_100, getEntries);
+  assert.notEqual(refreshed, forced);
+  assert.equal(scans, 3);
 });
 
 test("advanced sprites always render stable full poses without conceal or hybrid rows", () => {
@@ -453,7 +507,7 @@ test("animation submenu renders live previews and returns the selected option", 
   assert.ok(offLines.some((line) => line.includes("preview hidden (off)")), "off panel did not preview its hidden state");
   offMenu.dispose();
   assert.ok(first.every((line) => visibleWidth(line) <= 32));
-  await new Promise((resolve) => setTimeout(resolve, 90));
+  await new Promise((resolve) => setTimeout(resolve, 280));
   assert.ok(requestedRenders > 0);
   assert.notDeepEqual(menu.render(32), first, "submenu previews did not animate");
   for (const width of [1, 17, 18]) {
@@ -465,7 +519,7 @@ test("animation submenu renders live previews and returns the selected option", 
   menu.handleInput("enter");
   assert.equal(selected, "triforce");
   const stoppedAt = requestedRenders;
-  await new Promise((resolve) => setTimeout(resolve, 90));
+  await new Promise((resolve) => setTimeout(resolve, 130));
   assert.equal(requestedRenders, stoppedAt, "submenu timer survived selection cleanup");
 });
 
@@ -487,7 +541,7 @@ test("preview timers stop on cancel and external settings teardown", async () =>
   const cancelled = new AnimationPreviewMenu(tui, theme, keybindings, "random", () => {});
   cancelled.handleInput("escape");
   const afterCancel = requestedRenders;
-  await new Promise((resolve) => setTimeout(resolve, 90));
+  await new Promise((resolve) => setTimeout(resolve, 130));
   assert.equal(requestedRenders, afterCancel, "cancelled preview timer survived");
 
   const config = mergeInputRevampConfig(undefined);
@@ -511,11 +565,11 @@ test("preview timers stop on cancel and external settings teardown", async () =>
     },
   );
   root.handleInput("enter");
-  await new Promise((resolve) => setTimeout(resolve, 90));
+  await new Promise((resolve) => setTimeout(resolve, 130));
   assert.ok(requestedRenders > afterCancel, "settings submenu timer never started");
   root.dispose();
   const afterDispose = requestedRenders;
-  await new Promise((resolve) => setTimeout(resolve, 90));
+  await new Promise((resolve) => setTimeout(resolve, 130));
   assert.equal(requestedRenders, afterDispose, "preview timer survived external settings disposal/reload");
 });
 
@@ -636,19 +690,19 @@ test("session start registers the animation as an early above-editor widget", as
     handlers.get("tool_execution_end")?.[0]?.({ toolCallId: "b", toolName: "read" }, ctx);
     const parallelToolLines = component.render(40);
     assert.match(stripAnsi(parallelToolLines.at(-1) ?? ""), /bash:/, "ending one parallel tool cleared the remaining action state");
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    await new Promise((resolve) => setTimeout(resolve, 130));
     assert.ok(requestedRenders > 0, "widget timer never requested a render");
     idle = true;
     component.render(40); // starts the short exit lifecycle
     await new Promise((resolve) => setTimeout(resolve, 300));
     component.render(40); // completes exit and must stop the timer
     const idleStoppedAt = requestedRenders;
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    await new Promise((resolve) => setTimeout(resolve, 130));
     assert.equal(requestedRenders, idleStoppedAt, "widget kept a timer while fully idle");
     component.dispose();
     handlers.get("tool_execution_end")?.[0]?.({ toolCallId: "a", toolName: "bash" }, ctx);
     const stoppedAt = requestedRenders;
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    await new Promise((resolve) => setTimeout(resolve, 130));
     assert.equal(requestedRenders, stoppedAt, "widget timer survived disposal/reload cleanup");
     idle = true;
   } finally {

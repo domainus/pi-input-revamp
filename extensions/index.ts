@@ -410,7 +410,7 @@ function computeSessionInfo(entries: readonly any[]): {
   lastPromptTs: number | null;
 } {
   let turnCount = 0;
-  let sessionStartTs = Date.now();
+  let sessionStartTs = Number.POSITIVE_INFINITY;
   let lastPromptTs: number | null = null;
 
   for (const entry of entries) {
@@ -424,7 +424,11 @@ function computeSessionInfo(entries: readonly any[]): {
     }
   }
 
-  return { turnCount, sessionStartTs, lastPromptTs };
+  return {
+    turnCount,
+    sessionStartTs: Number.isFinite(sessionStartTs) ? sessionStartTs : 0,
+    lastPromptTs,
+  };
 }
 
 /** Computes the cumulative metrics of the assistant messages in the session. */
@@ -482,6 +486,40 @@ function computeLastTurnMetrics(entries: readonly any[]): { input: number; outpu
   if (input > 0 || output > 0 || cacheRead > 0 || cost > 0)
     return { input, output, cacheRead, cost };
   return null;
+}
+
+export interface SessionStatsSnapshot {
+  readonly at: number;
+  readonly entries: readonly any[];
+  readonly metrics: ReturnType<typeof computeSessionMetrics>;
+  readonly sessionInfo: ReturnType<typeof computeSessionInfo>;
+  readonly lastTurn: ReturnType<typeof computeLastTurnMetrics>;
+  readonly turnDuration: string;
+}
+
+export function refreshSessionStatsSnapshot(
+  current: SessionStatsSnapshot | undefined,
+  now: number,
+  getEntries: () => readonly any[],
+  force = false,
+): SessionStatsSnapshot {
+  if (!force && current && now - current.at < 1_000) return current;
+  const entries = getEntries();
+  const metrics = computeSessionMetrics(entries);
+  const sessionInfo = computeSessionInfo(entries);
+  const lastTurn = computeLastTurnMetrics(entries);
+  let turnDuration = "";
+  if (sessionInfo.lastPromptTs) {
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index];
+      if (entry.type === "message" && entry.message?.role === "assistant") {
+        const timestamp = new Date(entry.timestamp).getTime();
+        if (!isNaN(timestamp)) turnDuration = formatDuration(Math.round((timestamp - sessionInfo.lastPromptTs) / 1000));
+        break;
+      }
+    }
+  }
+  return { at: now, entries, metrics, sessionInfo, lastTurn, turnDuration };
 }
 
 // ── Brightness manipulation, works in BOTH truecolor AND 256-color ──
@@ -693,9 +731,10 @@ export interface AnimationDefinition {
 
 export type AnimationTier = "full" | "condensed" | "compact";
 
-/** Terminal-friendly 30 FPS cadence with shorter frame holds to avoid visible stutter. */
-export const WORKING_ANIMATION_TICK_MS = 33;
-export const ANIMATION_PREVIEW_TICK_MS = 33;
+/** Terminal-friendly 10 FPS repaint cadence; text effects are quantized to 4 FPS. */
+export const WORKING_ANIMATION_TICK_MS = 100;
+export const ANIMATION_PREVIEW_TICK_MS = 100;
+export const ANIMATION_STATUS_EFFECT_TICK_MS = 250;
 export const ANIMATION_FRAME_TIME_SCALE = 1.25;
 
 function spriteFrame(
@@ -858,17 +897,16 @@ export function sampleAnimationFrameTransition(
   return { current: frames[frames.length - 1], next: frames[frames.length - 1], progress: 1 };
 }
 
-function colorizeSpriteLine(line: string, c: AnimColors, frame: AnimationFrame, row: number, elapsed: number): string {
+function colorizeSpriteLine(line: string, c: AnimColors, frame: AnimationFrame): string {
   const layers = frame.layers ?? SPRITE_LAYERS;
-  return Array.from(line).map((glyph, column) => {
+  return Array.from(line).map((glyph) => {
     if (/\s/.test(glyph)) return glyph;
     const owner = layers.find((layer) => layer.glyphs?.includes(glyph))
       ?? layers.find((layer) => layer.name === "body")
       ?? { name: "body" as const, brightness: 0 };
-    // A low-amplitude traveling highlight supplies continuous motion between
-    // geometry updates without blinking or hiding any terminal cells.
-    const travelingHighlight = Math.round(6 * Math.sin(elapsed / 180 + column * 0.48 + row * 0.8));
-    const amount = owner.brightness + c.pulseOffset + travelingHighlight;
+    // Keep sprite ANSI byte-stable for the entire authored pose. Pi diffs raw
+    // strings, so continuous per-glyph color motion would repaint every line.
+    const amount = owner.brightness + c.pulseOffset;
     return c.layer ? c.layer(owner.name, glyph, amount) : c.shade(glyph, amount);
   }).join("");
 }
@@ -887,8 +925,8 @@ function selectAnimationRows(
   return frame.lines.map((line) => ({ line, frame }));
 }
 
-function colorizeAnimationRows(rows: readonly AnimationRowState[], c: AnimColors, motionElapsed: number): string[] {
-  return rows.map((row, index) => colorizeSpriteLine(row.line, c, row.frame, index, motionElapsed));
+function colorizeAnimationRows(rows: readonly AnimationRowState[], c: AnimColors, _motionElapsed: number): string[] {
+  return rows.map((row) => colorizeSpriteLine(row.line, c, row.frame));
 }
 
 export function renderAdvancedAnimation(
@@ -1377,7 +1415,7 @@ export function renderAdvancedWorkingWidgetLines(
   }
   if (runtime.startedAt <= 0) runtime.startedAt = now;
   const c: AnimColors = {
-    pulseOffset: Math.round(Math.sin(now / 240) * 8),
+    pulseOffset: 0,
     shade: (text, amount) => shadeFgAnsi(accentAnsi, amount, text),
     layer: (name, text, amount = 0) => {
       const bias = name === "status" ? -5 : amount;
@@ -1387,6 +1425,7 @@ export function renderAdvancedWorkingWidgetLines(
   const tier = animationTier(width);
   const targetPhase = phase as AnimationPhase;
   const motionElapsed = Math.max(0, now - runtime.startedAt);
+  const statusElapsed = Math.floor(motionElapsed / ANIMATION_STATUS_EFFECT_TICK_MS) * ANIMATION_STATUS_EFFECT_TICK_MS;
   const rows = selectAnimationRows(runtime.resolved, phaseElapsed, targetPhase);
   const sprite = colorizeAnimationRows(rows, c, motionElapsed);
   if (tier === "compact") {
@@ -1401,7 +1440,7 @@ export function renderAdvancedWorkingWidgetLines(
     const text = renderAnimationStatusText(
       runtime.resolved,
       expression,
-      Math.floor(motionElapsed * 0.65),
+      Math.floor(statusElapsed * 0.65),
       accentAnsi,
       expressionBudget,
     );
@@ -1411,7 +1450,7 @@ export function renderAdvancedWorkingWidgetLines(
   const output = body.map((line) => ansiSafeLine(line, width));
   const statusText = toolName ? `${toolName}: ${expression}` : expression;
   output.push(ansiSafeLine(
-    renderAnimationStatusText(runtime.resolved, statusText, Math.floor(motionElapsed * 0.65), accentAnsi, width),
+    renderAnimationStatusText(runtime.resolved, statusText, Math.floor(statusElapsed * 0.65), accentAnsi, width),
     width,
   ));
   return output;
@@ -1592,7 +1631,7 @@ export class AnimationPreviewMenu {
     const moment = animationPreviewMoment(elapsed);
     const colors: AnimColors = {
       shade: createAccentShader(this.theme.getFgAnsi("accent")),
-      pulseOffset: Math.round(Math.sin(elapsed / 240) * 8),
+      pulseOffset: 0,
     };
     const lines = renderAdvancedAnimation(resolved, moment.elapsed, moment.phase, colors, elapsed);
     return { resolved, moment, lines };
@@ -1615,7 +1654,7 @@ export class AnimationPreviewMenu {
     const sampleStatus = renderAnimationStatusText(
       resolved,
       "thinking hard...",
-      Math.floor(elapsed * 0.65),
+      Math.floor(elapsed / ANIMATION_STATUS_EFFECT_TICK_MS) * ANIMATION_STATUS_EFFECT_TICK_MS * 0.65,
       this.theme.getFgAnsi("accent"),
       Math.max(0, width - 2),
     );
@@ -1816,6 +1855,10 @@ class NerismaInputEditor extends CustomEditor {
   private _lastTokValue: number = -1;
   /** Metrics update counter (shown in parentheses after T). */
   private _metricUpdateCount: number = 0;
+  /** Session scans are expensive on long histories; animation renders reuse this snapshot. */
+  private _sessionStatsCache: SessionStatsSnapshot | undefined;
+  /** Forces one final metric scan when the agent transitions from active to idle. */
+  private _lastAgentIdle: boolean | undefined;
   /** Previous serialized value per element ID — used to detect changes for per-element pulse.
    *  Each ElementId carries its own metric (e.g. session-cost vs turn-cost are distinct ids),
    *  so the same value is produced wherever the id is placed and keying by id can't collide. */
@@ -2229,7 +2272,6 @@ class NerismaInputEditor extends CustomEditor {
     const promptColorFn = borderColorFn;
 
     // ── Session metrics (single computation, shared by all quadrants) ──
-    let entries: readonly any[] = [];
     let sessionElapsed = 0;
     let toolCount = 0;
     let tokEstimate = 0;
@@ -2242,15 +2284,21 @@ class NerismaInputEditor extends CustomEditor {
     };
 
     try {
-      entries = ctx.sessionManager?.getEntries?.() ?? [];
-      metrics = computeSessionMetrics(entries);
-      const info = computeSessionInfo(entries);
-      sessionInfo = info;
+      const agentIdle = Boolean(ctx.isIdle?.());
+      const forceFinalMetrics = agentIdle && this._lastAgentIdle === false;
+      this._lastAgentIdle = agentIdle;
+      this._sessionStatsCache = refreshSessionStatsSnapshot(
+        this._sessionStatsCache,
+        now,
+        () => ctx.sessionManager?.getEntries?.() ?? [],
+        forceFinalMetrics,
+      );
+      metrics = this._sessionStatsCache.metrics;
+      sessionInfo = this._sessionStatsCache.sessionInfo;
       hasAssistantResponse = metrics !== null && metrics.output > 0;
-      turnCount = info.turnCount;
-      sessionElapsed = info.sessionStartTs ? Math.round((Date.now() - info.sessionStartTs) / 1000) : 0;
-      const wireTools = effectiveToolNames(pi);
-      toolCount = wireTools.length;
+      turnCount = sessionInfo.turnCount;
+      sessionElapsed = sessionInfo.sessionStartTs ? Math.round((now - sessionInfo.sessionStartTs) / 1000) : 0;
+      toolCount = effectiveToolNames(pi).length;
       tokEstimate = estimateTokens(this.getText());
       const usage = ctx.getContextUsage();
       if (usage) {
@@ -2288,27 +2336,15 @@ class NerismaInputEditor extends CustomEditor {
     }
 
     // ── Last turn tracking ──────────────────────────────
-    const lastTurn = computeLastTurnMetrics(entries);
+    const lastTurn = this._sessionStatsCache?.lastTurn ?? null;
     if (hasAssistantResponse && lastTurn && sessionInfo) {
-      const turnDuration = (() => {
-        const luts = sessionInfo.lastPromptTs;
-        if (!luts) return "";
-        for (let i = entries.length - 1; i >= 0; i--) {
-          const e = entries[i];
-          if (e.type === "message" && e.message?.role === "assistant") {
-            const ts = new Date(e.timestamp).getTime();
-            if (!isNaN(ts)) return formatDuration(Math.round((ts - luts) / 1000));
-          }
-        }
-        return "";
-      })();
       this._lastCompletedTurn = {
         turnNum: turnCount > 0 ? turnCount : 0,
         cost: lastTurn.cost,
         output: lastTurn.output,
         cacheRead: lastTurn.cacheRead,
         input: lastTurn.input,
-        duration: turnDuration,
+        duration: this._sessionStatsCache?.turnDuration ?? "",
       };
     }
 

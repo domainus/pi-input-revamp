@@ -13,9 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   twinkle, flutter, triad, streak, pixel, glow, shadow, flicker, segment, and goo), including
   grapheme-safe clipping, animated ANSI-16/custom-color fallback, and matching live sample
   text in the selected settings preview.
-- Gentle, flicker-free animation pacing: widget/settings refresh at 30 FPS while complete sprite
-  poses hold for 100–238 ms, with slower low-amplitude lighting and text motion between them.
-  Geometry never tears row-by-row, uses conceal-based crossfades, or splits faces into hybrid glyphs.
+- Terminal-render-aware animation pacing: widget/settings update at 10 FPS, complete poses hold for
+  100–238 ms, matching text effects advance at 4 FPS, and held-pose ANSI output remains byte-stable.
+  This prevents Pi's raw-line diff from clearing/repainting unchanged rows; one-second session-metric
+  caching also avoids repeated full-history scans. Geometry never tears, conceals, or hybridizes.
 - A typed advanced animation engine with variable frame durations, enter/idle/action/exit
   phases, theme-safe named color layers, and full/condensed/compact terminal tiers.
 - Live multi-line selected-row panels plus phase-aware advanced sprite art in every animation
