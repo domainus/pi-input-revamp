@@ -297,9 +297,8 @@ const THINKING_EXPRESSIONS = [
   "definitely not overthinking...",
 ];
 
-/** Tools currently executing; the newest name drives the action animation. */
+/** Last tool currently executing (read by the editor). */
 let activeToolName: string | null = null;
-const activeToolNames = new Map<string, string>();
 
 /**
  * Read-only view of the footer data, captured from the (otherwise hidden) footer
@@ -410,7 +409,7 @@ function computeSessionInfo(entries: readonly any[]): {
   lastPromptTs: number | null;
 } {
   let turnCount = 0;
-  let sessionStartTs = Number.POSITIVE_INFINITY;
+  let sessionStartTs = Date.now();
   let lastPromptTs: number | null = null;
 
   for (const entry of entries) {
@@ -424,11 +423,7 @@ function computeSessionInfo(entries: readonly any[]): {
     }
   }
 
-  return {
-    turnCount,
-    sessionStartTs: Number.isFinite(sessionStartTs) ? sessionStartTs : 0,
-    lastPromptTs,
-  };
+  return { turnCount, sessionStartTs, lastPromptTs };
 }
 
 /** Computes the cumulative metrics of the assistant messages in the session. */
@@ -486,40 +481,6 @@ function computeLastTurnMetrics(entries: readonly any[]): { input: number; outpu
   if (input > 0 || output > 0 || cacheRead > 0 || cost > 0)
     return { input, output, cacheRead, cost };
   return null;
-}
-
-export interface SessionStatsSnapshot {
-  readonly at: number;
-  readonly entries: readonly any[];
-  readonly metrics: ReturnType<typeof computeSessionMetrics>;
-  readonly sessionInfo: ReturnType<typeof computeSessionInfo>;
-  readonly lastTurn: ReturnType<typeof computeLastTurnMetrics>;
-  readonly turnDuration: string;
-}
-
-export function refreshSessionStatsSnapshot(
-  current: SessionStatsSnapshot | undefined,
-  now: number,
-  getEntries: () => readonly any[],
-  force = false,
-): SessionStatsSnapshot {
-  if (!force && current && now - current.at < 1_000) return current;
-  const entries = getEntries();
-  const metrics = computeSessionMetrics(entries);
-  const sessionInfo = computeSessionInfo(entries);
-  const lastTurn = computeLastTurnMetrics(entries);
-  let turnDuration = "";
-  if (sessionInfo.lastPromptTs) {
-    for (let index = entries.length - 1; index >= 0; index--) {
-      const entry = entries[index];
-      if (entry.type === "message" && entry.message?.role === "assistant") {
-        const timestamp = new Date(entry.timestamp).getTime();
-        if (!isNaN(timestamp)) turnDuration = formatDuration(Math.round((timestamp - sessionInfo.lastPromptTs) / 1000));
-        break;
-      }
-    }
-  }
-  return { at: now, entries, metrics, sessionInfo, lastTurn, turnDuration };
 }
 
 // ── Brightness manipulation, works in BOTH truecolor AND 256-color ──
@@ -585,36 +546,16 @@ function parseFgAnsi(ansi: string): { rgb: [number, number, number]; mode: "true
  * (±RGB per channel). Re-emits in the original mode (truecolor or 256), so the
  * pulse works in both.
  */
-type AccentShader = (text: string, amount: number) => string;
-const accentShaderCache = new Map<string, AccentShader>();
-
-function createAccentShader(baseAnsi: string): AccentShader {
-  const cached = accentShaderCache.get(baseAnsi);
-  if (cached) return cached;
-  const parsed = parseFgAnsi(baseAnsi);
-  const shader: AccentShader = !parsed
-    ? (text, amount) => {
-        // ANSI-16, empty, and custom theme sequences cannot be RGB-shifted safely.
-        // Preserve the supplied accent and animate intensity instead of becoming static.
-        const intensity = amount >= 65 ? "\x1b[1m" : amount <= -15 ? "\x1b[2m" : "\x1b[22m";
-        return `${intensity}${baseAnsi}${text}\x1b[22;39m`;
-      }
-    : (text, amount) => {
-        const r = Math.max(0, Math.min(255, parsed.rgb[0] + amount));
-        const g = Math.max(0, Math.min(255, parsed.rgb[1] + amount));
-        const b = Math.max(0, Math.min(255, parsed.rgb[2] + amount));
-        const open = parsed.mode === "truecolor"
-          ? `\x1b[38;2;${r};${g};${b}m`
-          : `\x1b[38;5;${rgbTo256(r, g, b)}m`;
-        return `${open}${text}\x1b[39m`;
-      };
-  if (accentShaderCache.size >= 16) accentShaderCache.clear();
-  accentShaderCache.set(baseAnsi, shader);
-  return shader;
-}
-
 function shadeFgAnsi(baseAnsi: string, amount: number, text: string): string {
-  return createAccentShader(baseAnsi)(text, amount);
+  const p = parseFgAnsi(baseAnsi);
+  if (!p) return `${baseAnsi}${text}\x1b[39m`; // unknown format → raw accent
+  const r = Math.max(0, Math.min(255, p.rgb[0] + amount));
+  const g = Math.max(0, Math.min(255, p.rgb[1] + amount));
+  const b = Math.max(0, Math.min(255, p.rgb[2] + amount));
+  const open = p.mode === "truecolor"
+    ? `\x1b[38;2;${r};${g};${b}m`
+    : `\x1b[38;5;${rgbTo256(r, g, b)}m`;
+  return `${open}${text}\x1b[39m`;
 }
 
 /**
@@ -691,338 +632,11 @@ export function rainbowWorkflowSlice(
   return output + text.slice(localOffset);
 }
 
-export interface AnimationColors {
+interface AnimColors {
   /** accent lightened (amount>0) or darkened (amount<0) by `amount` per RGB channel */
   shade: (s: string, amount: number) => string;
   /** brightness offset of the global pulse (oscillates with the sine, ~ -50..+50) */
   pulseOffset: number;
-  /** Optional named layer renderer used by the advanced sprite engine. */
-  layer?: (name: AnimationColorLayer, s: string, amount?: number) => string;
-}
-
-type AnimColors = AnimationColors;
-
-/** Lifecycle phases shared by every advanced working-animation definition. */
-export type AnimationPhase = "enter" | "idle" | "action" | "exit";
-export type AnimationColorLayer = "shadow" | "body" | "highlight" | "face" | "spark" | "status";
-
-export interface AnimationLayer {
-  readonly name: AnimationColorLayer;
-  /** Relative brightness, applied without changing the active theme palette. */
-  readonly brightness: number;
-  /** Glyphs owned by this layer; adding sprite art never requires renderer edits. */
-  readonly glyphs?: string;
-}
-
-/** A frame is deliberately data-first so new sprites can be added without code. */
-export interface AnimationFrame {
-  readonly phase: AnimationPhase;
-  readonly duration: number;
-  readonly lines: readonly string[];
-  readonly layers?: readonly AnimationLayer[];
-  readonly semantic?: string;
-}
-
-export interface AnimationDefinition {
-  readonly id: WorkingAnimation;
-  readonly frames: readonly AnimationFrame[];
-  readonly compact: readonly string[];
-}
-
-export type AnimationTier = "full" | "condensed" | "compact";
-
-/**
- * Terminal-friendly motion cadence. Widgets and previews get a 20 FPS render
- * opportunity, while status/text effects deliberately quantize to 10 FPS so
- * complete poses remain stable between meaningful ticks.
- */
-export const WORKING_ANIMATION_TICK_MS = 50;
-export const ANIMATION_PREVIEW_TICK_MS = 50;
-export const ANIMATION_STATUS_EFFECT_TICK_MS = 100;
-export const ANIMATION_FRAME_TIME_SCALE = 1.25;
-
-/** Quantize motion sampling so incidental global renders do not churn ANSI. */
-export function quantizeAnimationElapsed(elapsed: number, tickMs: number = WORKING_ANIMATION_TICK_MS): number {
-  if (!Number.isFinite(elapsed) || elapsed <= 0) return 0;
-  return Math.floor(elapsed / Math.max(1, tickMs)) * Math.max(1, tickMs);
-}
-
-function spriteFrame(
-  phase: AnimationPhase,
-  duration: number,
-  lines: readonly string[],
-  semantic: string,
-  layers: readonly AnimationLayer[] = [
-    { name: "shadow", brightness: -35, glyphs: "_~" },
-    { name: "body", brightness: 20, glyphs: "─═│█▟▙▜▛▀▄[](){}" },
-    { name: "highlight", brightness: 75, glyphs: "╭╮╰╯‹›«»ʚɞ╾╼" },
-    { name: "face", brightness: 100, glyphs: "•ᴗ●◉◆><" },
-    { name: "spark", brightness: 120, glyphs: "·✧✦*⋆♨▲" },
-  ],
-): AnimationFrame {
-  return {
-    phase,
-    duration: Math.max(1, Math.round(duration * ANIMATION_FRAME_TIME_SCALE)),
-    lines,
-    semantic,
-    layers,
-  };
-}
-
-const SPRITE_LAYERS = [
-  { name: "shadow", brightness: -35, glyphs: "_~" },
-  { name: "body", brightness: 20, glyphs: "─═│█▟▙▜▛▀▄[](){}" },
-  { name: "highlight", brightness: 75, glyphs: "╭╮╰╯‹›«»ʚɞ╾╼" },
-  { name: "face", brightness: 100, glyphs: "•ᴗ●◉◆><" },
-  { name: "spark", brightness: 120, glyphs: "·✧✦*⋆♨▲" },
-] as const satisfies readonly AnimationLayer[];
-
-const ADVANCED_SPRITES: Partial<Record<WorkingAnimation, readonly AnimationFrame[]>> = {
-  slime: [
-    spriteFrame("enter", 90, ["    ·    ", "  ╭───╮  ", "  ╰ •ᴗ•╯  "], "slime-enter", SPRITE_LAYERS),
-    spriteFrame("enter", 120, ["   ·✧·   ", " ╭─────╮ ", " ╰ •ᴗ• ╯ "], "slime-rise", SPRITE_LAYERS),
-    spriteFrame("idle", 155, ["  ╭───╮  ", " ╭┤•ᴗ•├╮ ", " ╰─╮_╭─╯ "], "slime-round", SPRITE_LAYERS),
-    spriteFrame("idle", 190, [" ╭─────╮ ", "╭┤• ᴗ •├╮", "╰─╮___╭─╯"], "slime-wobble", SPRITE_LAYERS),
-    spriteFrame("action", 95, ["   ╭─╮   ", " ╭─┤•ᴗ•├─╮ ", "╰──╯_╰──╯"], "slime-bounce", SPRITE_LAYERS),
-    spriteFrame("action", 120, ["  ╭───╮  ", " ╭┤>ᴗ<├╮ ", "╰─╮___╭─╯"], "slime-action-face", SPRITE_LAYERS),
-    spriteFrame("exit", 90, [" ╭─────╮ ", "╰┤•ᴗ•├╯ ", "  ╰~~~╯  "], "slime-melt", SPRITE_LAYERS),
-    spriteFrame("exit", 110, ["   ╭─╮   ", "   •ᴗ•   ", "  ~~~~~  "], "slime-pop", SPRITE_LAYERS),
-  ],
-  fairy: [
-    spriteFrame("enter", 120, ["   ·✧·   ", "  ʚ●ɞ  ", "   · ·   "], "fairy-arrive"),
-    spriteFrame("idle", 140, [" · ʚ●ɞ · ", "  ‹✦›  ", " ·  ·  · "], "fairy-flutter"),
-    spriteFrame("idle", 170, ["  ✧ʚ◉ɞ✧  ", " · ‹› · ", "   · ·   "], "fairy-glow"),
-    spriteFrame("action", 95, ["✧ ʚ●ɞ  ✧", "  ‹◆›  ", " ·  ·  · "], "fairy-spark"),
-    spriteFrame("exit", 130, ["   ·✧·   ", "   ʚ●ɞ   ", "    ·    "], "fairy-fade"),
-  ],
-  aura: [
-    spriteFrame("enter", 110, ["    ·    ", "   ‹●›   ", "    ·    "], "aura-rise"),
-    spriteFrame("idle", 120, ["   ‹●›   ", "  «(◉)»  ", "   ‹●›   "], "aura-breathe"),
-    spriteFrame("idle", 160, ["  «{◆}»  ", " ‹{◉}› ", "  «{◆}»  "], "aura-expand"),
-    spriteFrame("action", 90, [" «‹◆›» ", "‹{◉}›", " «‹◆›» "], "aura-pulse"),
-    spriteFrame("exit", 140, ["   ‹●›   ", "    ·    ", "         "], "aura-fade"),
-  ],
-  mecha: [
-    spriteFrame("enter", 100, ["    [ ]    ", "  ╾[●]╼  ", "    ╰─╯    "], "mecha-boot"),
-    spriteFrame("idle", 135, ["  ╾[·─·]╼  ", " ╾[●─●]╼ ", "   ╰═╯   "], "mecha-idle"),
-    spriteFrame("idle", 175, [" ╾═[◉─◉]═╼ ", "  ╾[◆]╼  ", "   ╰═╯   "], "mecha-scan"),
-    spriteFrame("action", 85, ["╾═[◆─◆]═╼", " ╾[◉]╼ ", "  ╰═╯  "], "mecha-action"),
-    spriteFrame("exit", 120, ["  ╾[·]╼  ", "    [ ]    ", "     ·     "], "mecha-powerdown"),
-  ],
-  flame: [
-    spriteFrame("enter", 100, ["    ·    ", "   ‹♨›   ", "    ●    "], "flame-light"),
-    spriteFrame("idle", 125, ["   ·♨·   ", "  ‹♨●♨›  ", "   ‹◆›   "], "flame-flicker"),
-    spriteFrame("idle", 155, ["  ‹♨♨›  ", " ‹♨(◉)♨› ", "  ‹◆◆›  "], "flame-tall"),
-    spriteFrame("action", 80, [" ‹♨◆♨› ", "‹♨(◉)♨›", " ‹♨◆♨› "], "flame-burst"),
-    spriteFrame("exit", 120, ["   ‹♨›   ", "    ·    ", "         "], "flame-snuff"),
-  ],
-  invader: [
-    spriteFrame("enter", 120, ["    ▟█▙    ", "     ▀     ", "           "], "invader-drop"),
-    spriteFrame("idle", 150, ["   ▟███▙   ", "  ▟█▄█▄█▙  ", "   ▀█▀█▀   "], "invader-hover"),
-    spriteFrame("idle", 180, ["  ▟███▙  ", " ▟█▀█▀█▙ ", "▗█▛ ▀ ▜█▖"], "invader-wobble"),
-    spriteFrame("action", 90, [" ▟███▙ ", "▟█◆█◆█▙", " ▀█▀█▀ "], "invader-beam"),
-    spriteFrame("exit", 120, ["   ▟█▙   ", "    ▀    ", "    ·    "], "invader-flyaway"),
-  ],
-  triforce: [
-    spriteFrame("enter", 110, ["     ▲     ", "           ", "           "], "triforce-rise"),
-    spriteFrame("idle", 145, ["     ▲     ", "    ▲ ▲    ", "   ▲   ▲   "], "triforce-build"),
-    spriteFrame("idle", 180, ["    ▲ ▲    ", "   ▲   ▲   ", "  ▲ ▲ ▲ ▲  "], "triforce-glow"),
-    spriteFrame("action", 100, ["   ▲◆▲   ", "  ▲◆◆◆▲  ", " ▲◆◆◆◆◆▲ "], "triforce-cast"),
-    spriteFrame("exit", 130, ["    ▲ ▲    ", "     ▲     ", "           "], "triforce-fade"),
-  ],
-};
-
-/**
- * Normalize one animation's authored rows onto a shared canvas.
- *
- * Sprite art is authored with convenient per-row whitespace, but that padding
- * is not a reliable positioning contract: rows from different poses can have
- * different outer margins. Strip only outer whitespace (internal spaces remain
- * part of the glyph art), then center every row against the widest row in the
- * animation. This happens before ANSI coloring so terminal width and clipping
- * remain deterministic.
- */
-const normalizedAnimationFramesCache = new WeakMap<readonly AnimationFrame[], readonly AnimationFrame[]>();
-const actionLoopFramesCache = new WeakMap<readonly AnimationFrame[], readonly AnimationFrame[]>();
-
-export function normalizeAnimationFrames(frames: readonly AnimationFrame[]): readonly AnimationFrame[] {
-  const cached = normalizedAnimationFramesCache.get(frames);
-  if (cached) return cached;
-  const trimmed = frames.map((frame) => frame.lines.map((line) => line.trim()));
-  const canvasWidth = Math.max(0, ...trimmed.flatMap((lines) => lines.map((line) => visibleWidth(line))));
-  const normalized = frames.map((frame, frameIndex) => ({
-    ...frame,
-    lines: trimmed[frameIndex].map((line) => {
-      const lineWidth = visibleWidth(line);
-      const left = Math.floor((canvasWidth - lineWidth) / 2);
-      return `${" ".repeat(left)}${line}${" ".repeat(canvasWidth - left - lineWidth)}`;
-    }),
-  }));
-  normalizedAnimationFramesCache.set(frames, normalized);
-  return normalized;
-}
-
-/**
- * Action phases must keep moving even when an animation author supplied only
- * one action keyframe. Add one complete, already-normalized recovery pose from
- * the nearest idle/enter/exit pose rather than interpolating rows (which would
- * create hybrid or concealed sprites). The source frame remains first so the
- * authored action always starts at the same point.
- */
-function ensureActionLoop(frames: readonly AnimationFrame[]): readonly AnimationFrame[] {
-  const cached = actionLoopFramesCache.get(frames);
-  if (cached) return cached;
-  const action = frames.filter((frame) => frame.phase === "action");
-  const signatures = new Set(action.map((frame) => JSON.stringify(frame.lines)));
-  if (action.length >= 2 && signatures.size >= 2) {
-    actionLoopFramesCache.set(frames, frames);
-    return frames;
-  }
-  const source = action[0];
-  if (!source) {
-    actionLoopFramesCache.set(frames, frames);
-    return frames;
-  }
-  const actionIndex = frames.findIndex((frame) => frame.phase === "action");
-  const distinct = (frame: AnimationFrame) => !signatures.has(JSON.stringify(frame.lines));
-  // Prefer the last idle pose immediately preceding action; it is the closest
-  // authored recovery pose and avoids flashing back to an unrelated boot/enter
-  // frame during a long-running tool call.
-  const recovery = frames.slice(0, actionIndex).reverse().find((frame) => frame.phase === "idle" && distinct(frame))
-    ?? frames.find((frame) => frame.phase === "idle" && distinct(frame))
-    ?? frames.find((frame) => frame.phase !== "action" && distinct(frame));
-  if (!recovery) {
-    actionLoopFramesCache.set(frames, frames);
-    return frames;
-  }
-  const loopFrame: AnimationFrame = {
-    ...recovery,
-    phase: "action",
-    duration: source.duration,
-    semantic: `${recovery.semantic ?? "recovery"}-action`,
-  };
-  const looped = [...frames, loopFrame];
-  actionLoopFramesCache.set(frames, looped);
-  return looped;
-}
-
-function animationFrames(animation: WorkingAnimation): readonly AnimationFrame[] {
-  const dedicated = ADVANCED_SPRITES[animation];
-  if (dedicated) return ensureActionLoop(normalizeAnimationFrames(dedicated));
-  const plain = (elapsed: number) => renderWorkingAnimation(animation, elapsed, { shade: (s) => s, pulseOffset: 0 });
-  return ensureActionLoop(normalizeAnimationFrames([
-    spriteFrame("enter", 90, [`· ${plain(0)}`], `${animation}-enter`),
-    spriteFrame("idle", 120, [plain(0)], `${animation}-idle-1`),
-    spriteFrame("idle", 120, [plain(120)], `${animation}-idle-2`),
-    spriteFrame("action", 90, [`‹${plain(180)}›`], `${animation}-action`),
-    spriteFrame("exit", 100, [`${plain(240)} ·`], `${animation}-exit`),
-  ]));
-}
-
-export function getAnimationDefinition(animation: WorkingAnimation): AnimationDefinition {
-  return { id: animation, frames: animationFrames(animation), compact: [renderWorkingAnimation(animation, 0, { shade: (s) => s, pulseOffset: 0 })] };
-}
-
-export function animationPhaseDuration(animation: WorkingAnimation, phase: AnimationPhase): number {
-  return animationFrames(animation)
-    .filter((frame) => frame.phase === phase)
-    .reduce((total, frame) => total + frame.duration, 0);
-}
-
-export function selectAnimationFrame(
-  animation: WorkingAnimation,
-  elapsed: number,
-  phase: AnimationPhase = "idle",
-): AnimationFrame {
-  const frames = animationFrames(animation).filter((frame) => frame.phase === phase);
-  const available = frames.length > 0 ? frames : animationFrames(animation).filter((frame) => frame.phase === "idle");
-  if (available.length === 0) return animationFrames(animation)[0];
-  const total = available.reduce((sum, frame) => sum + frame.duration, 0);
-  let cursor = ((Math.max(0, elapsed) % total) + total) % total;
-  for (const frame of available) {
-    if (cursor < frame.duration) return frame;
-    cursor -= frame.duration;
-  }
-  return available[available.length - 1];
-}
-
-export interface AnimationFrameTransition {
-  readonly current: AnimationFrame;
-  readonly next: AnimationFrame;
-  readonly progress: number;
-}
-
-export function sampleAnimationFrameTransition(
-  animation: WorkingAnimation,
-  elapsed: number,
-  phase: AnimationPhase = "idle",
-): AnimationFrameTransition {
-  const phaseFrames = animationFrames(animation).filter((frame) => frame.phase === phase);
-  const available = phaseFrames.length > 0
-    ? phaseFrames
-    : animationFrames(animation).filter((frame) => frame.phase === "idle");
-  const frames = available.length > 0 ? available : [animationFrames(animation)[0]];
-  const total = frames.reduce((sum, frame) => sum + frame.duration, 0);
-  const looping = phase === "idle" || phase === "action";
-  let cursor = looping
-    ? ((Math.max(0, elapsed) % total) + total) % total
-    : Math.min(Math.max(0, elapsed), Math.max(0, total - 1));
-  for (let index = 0; index < frames.length; index++) {
-    const current = frames[index];
-    if (cursor < current.duration) {
-      return {
-        current,
-        next: index + 1 < frames.length ? frames[index + 1] : (looping ? frames[0] : current),
-        progress: current.duration <= 1 ? 1 : cursor / current.duration,
-      };
-    }
-    cursor -= current.duration;
-  }
-  return { current: frames[frames.length - 1], next: frames[frames.length - 1], progress: 1 };
-}
-
-function colorizeSpriteLine(line: string, c: AnimColors, frame: AnimationFrame): string {
-  const layers = frame.layers ?? SPRITE_LAYERS;
-  return Array.from(line).map((glyph) => {
-    if (/\s/.test(glyph)) return glyph;
-    const owner = layers.find((layer) => layer.glyphs?.includes(glyph))
-      ?? layers.find((layer) => layer.name === "body")
-      ?? { name: "body" as const, brightness: 0 };
-    // Keep sprite ANSI byte-stable for the entire authored pose. Pi diffs raw
-    // strings, so continuous per-glyph color motion would repaint every line.
-    const amount = owner.brightness + c.pulseOffset;
-    return c.layer ? c.layer(owner.name, glyph, amount) : c.shade(glyph, amount);
-  }).join("");
-}
-
-interface AnimationRowState {
-  readonly line: string;
-  readonly frame: AnimationFrame;
-}
-
-function selectAnimationRows(
-  animation: WorkingAnimation,
-  elapsed: number,
-  phase: AnimationPhase,
-): AnimationRowState[] {
-  const frame = sampleAnimationFrameTransition(animation, elapsed, phase).current;
-  return frame.lines.map((line) => ({ line, frame }));
-}
-
-function colorizeAnimationRows(rows: readonly AnimationRowState[], c: AnimColors, _motionElapsed: number): string[] {
-  return rows.map((row) => colorizeSpriteLine(row.line, c, row.frame));
-}
-
-export function renderAdvancedAnimation(
-  animation: WorkingAnimation,
-  elapsed: number,
-  phase: AnimationPhase,
-  c: AnimColors,
-  motionElapsed: number = elapsed,
-): string[] {
-  const sampledElapsed = quantizeAnimationElapsed(elapsed);
-  const sampledMotionElapsed = quantizeAnimationElapsed(motionElapsed);
-  return colorizeAnimationRows(selectAnimationRows(animation, sampledElapsed, phase), c, sampledMotionElapsed);
 }
 
 /**
@@ -1154,11 +768,6 @@ export interface AnimationRuntime {
   startedAt: number;
   expressionIndex: number;
   expressionChangedAt: number;
-  /** Advanced lifecycle state; optional for persisted/backward-compatible callers. */
-  phase?: AnimationPhase | "idle";
-  phaseStartedAt?: number;
-  lastActive?: boolean;
-  lastToolName?: string | null;
 }
 
 interface EditorContext {
@@ -1234,34 +843,6 @@ export function buildInputSettingItems(
   }, ...visibilityItems];
 }
 
-export function resolveAnimationForSession(
-  config: InputRevampConfig,
-  runtime: AnimationRuntime,
-  reason: string,
-): boolean {
-  runtime.selected = config.animations.working;
-  let persistedRandom = false;
-  if (runtime.selected === "random") {
-    if (reason === "reload") {
-      runtime.resolved = config.animations.lastWorking ?? runtime.resolved;
-    } else {
-      runtime.resolved = pickWorkingAnimation("random", config.animations.lastWorking);
-      config.animations.lastWorking = runtime.resolved;
-      persistedRandom = true;
-    }
-  } else {
-    runtime.resolved = pickWorkingAnimation(runtime.selected, config.animations.lastWorking ?? runtime.resolved);
-  }
-  runtime.startedAt = 0;
-  runtime.expressionIndex = -1;
-  runtime.expressionChangedAt = 0;
-  runtime.phase = undefined;
-  runtime.phaseStartedAt = undefined;
-  runtime.lastActive = undefined;
-  runtime.lastToolName = undefined;
-  return persistedRandom;
-}
-
 export function applyInputSettingValue(
   config: InputRevampConfig,
   runtime: AnimationRuntime,
@@ -1273,10 +854,6 @@ export function applyInputSettingValue(
     runtime.selected = newValue;
     runtime.resolved = pickWorkingAnimation(newValue, config.animations.lastWorking ?? runtime.resolved);
     runtime.startedAt = 0;
-    runtime.phase = undefined;
-    runtime.phaseStartedAt = undefined;
-    runtime.lastActive = undefined;
-    runtime.lastToolName = undefined;
     config.animations.working = newValue;
     if (newValue === "random") config.animations.lastWorking = runtime.resolved;
     return true;
@@ -1332,220 +909,6 @@ export function centerCropToWidth(text: string, maxWidth: number): string {
   return sliceAnsiColumns(text, Math.floor((width - maxWidth) / 2), maxWidth);
 }
 
-export function animationTier(width: number): AnimationTier {
-  if (width >= 28) return "full";
-  if (width >= 16) return "condensed";
-  return "compact";
-}
-
-function ansiSafeLine(line: string, width: number, pad = true): string {
-  if (width <= 0) return "";
-  const clipped = truncateToWidth(line, width, "");
-  // A clipped SGR sequence can otherwise bleed into the editor. The renderer
-  // uses foreground resets per glyph, but the final reset makes this safe for
-  // theme implementations that use a single opening sequence.
-  const safe = /\x1b\[[0-?]*[ -\/]*[@-~]/.test(clipped) ? `${clipped}\x1b[0m` : clipped;
-  return pad ? safe + " ".repeat(Math.max(0, width - visibleWidth(safe))) : safe;
-}
-
-function transitionAnimationPhase(runtime: AnimationRuntime, active: boolean, toolName: string | null, now: number): AnimationPhase | "idle" {
-  if (runtime.phaseStartedAt === undefined || runtime.phase === undefined) {
-    runtime.phase = active ? "enter" : "idle";
-    runtime.phaseStartedAt = now;
-    runtime.lastActive = active;
-    runtime.lastToolName = toolName;
-    return runtime.phase;
-  }
-  const previousActive = runtime.lastActive ?? false;
-  const previousTool = runtime.lastToolName ?? null;
-  const moveTo = (next: AnimationPhase): void => {
-    if (runtime.phase === next) return;
-    runtime.phase = next;
-    runtime.phaseStartedAt = now;
-  };
-  if (!active) {
-    if (previousActive && runtime.phase !== "exit") moveTo("exit");
-    runtime.lastActive = false;
-    runtime.lastToolName = null;
-    return runtime.phase;
-  }
-  if (!previousActive || runtime.phase === "exit") {
-    moveTo("enter");
-  } else if (runtime.phase === "enter" && now - runtime.phaseStartedAt >= Math.max(1, animationPhaseDuration(runtime.resolved, "enter"))) {
-    moveTo(toolName ? "action" : "idle");
-  } else if (runtime.phase !== "enter" && Boolean(toolName) !== Boolean(previousTool)) {
-    moveTo(toolName ? "action" : "idle");
-  }
-  runtime.lastActive = true;
-  runtime.lastToolName = toolName;
-  return runtime.phase;
-}
-
-export type AnimationTextEffect = "ripple" | "orbit" | "scan" | "bounce" | "twinkle"
-  | "flutter" | "triad" | "streak" | "pixel" | "glow" | "shadow"
-  | "flicker" | "segment" | "goo";
-
-export const ANIMATION_TEXT_EFFECTS: Readonly<Record<WorkingAnimation, AnimationTextEffect>> = {
-  wave: "ripple",
-  orbit: "orbit",
-  scanner: "scan",
-  bounce: "bounce",
-  sparkle: "twinkle",
-  fairy: "flutter",
-  triforce: "triad",
-  speedster: "streak",
-  invader: "pixel",
-  aura: "glow",
-  ninja: "shadow",
-  flame: "flicker",
-  mecha: "segment",
-  slime: "goo",
-};
-
-const graphemeSegmenter = typeof (Intl as any).Segmenter === "function"
-  ? new (Intl as any).Segmenter(undefined, { granularity: "grapheme" })
-  : null;
-
-function splitGraphemes(text: string): string[] {
-  if (!graphemeSegmenter) return Array.from(text);
-  return Array.from(graphemeSegmenter.segment(text), (part: any) => part.segment as string);
-}
-
-function clipGraphemesToWidth(text: string, maxWidth: number): string {
-  if (!Number.isFinite(maxWidth)) return text;
-  let width = 0;
-  let output = "";
-  for (const grapheme of splitGraphemes(text)) {
-    const graphemeWidth = visibleWidth(grapheme);
-    if (width + graphemeWidth > Math.max(0, maxWidth)) break;
-    output += grapheme;
-    width += graphemeWidth;
-  }
-  return output;
-}
-
-/** Theme-safe, grapheme-safe, width-preserving character shader paired with each sprite. */
-export function renderAnimationStatusText(
-  animation: WorkingAnimation,
-  text: string,
-  elapsed: number,
-  accentAnsi: string,
-  maxWidth: number = Number.POSITIVE_INFINITY,
-): string {
-  const glyphs = splitGraphemes(clipGraphemesToWidth(text, maxWidth));
-  const shader = createAccentShader(accentAnsi);
-  const count = Math.max(1, glyphs.length);
-  const effectElapsed = quantizeAnimationElapsed(elapsed, ANIMATION_STATUS_EFFECT_TICK_MS);
-  const tick = Math.floor(effectElapsed / ANIMATION_STATUS_EFFECT_TICK_MS);
-  const mod = (value: number, base: number) => ((value % base) + base) % base;
-  const beamDistance = (index: number, speed: number) => {
-    const beam = mod(Math.floor(effectElapsed / speed), count);
-    const direct = Math.abs(index - beam);
-    return Math.min(direct, count - direct);
-  };
-  const amountFor = (index: number): number => {
-    switch (ANIMATION_TEXT_EFFECTS[animation]) {
-      case "ripple": return Math.round(15 + 55 * Math.sin(effectElapsed / 95 + index * 0.72));
-      case "orbit": return beamDistance(index, 70) <= 1 ? 105 : -20;
-      case "scan": return Math.max(-35, 110 - beamDistance(index, 45) * 45);
-      case "bounce": return Math.round(-20 + 90 * Math.abs(Math.sin(effectElapsed / 105 + index * 0.32)));
-      case "twinkle": return mod(index * 7 + tick, 6) === 0 ? 125 : Math.round(5 + 25 * Math.sin(index + effectElapsed / 180));
-      case "flutter": return Math.round(25 + 45 * Math.sin(effectElapsed / 80 + index * 1.35));
-      case "triad": return mod(index - Math.floor(effectElapsed / ANIMATION_STATUS_EFFECT_TICK_MS), 3) === 0 ? 110 : 5;
-      case "streak": return Math.max(-30, 120 - beamDistance(index, 32) * 34);
-      case "pixel": return mod(index + Math.floor(effectElapsed / ANIMATION_STATUS_EFFECT_TICK_MS), 2) === 0 ? 75 : -20;
-      case "glow": return Math.round(30 + 55 * Math.sin(effectElapsed / 150) + 18 * Math.cos(index * 0.45));
-      case "shadow": return beamDistance(index, 95) === 0 ? 95 : -45;
-      case "flicker": return Math.round(35 + 45 * Math.sin(effectElapsed / 52 + index * 2.1) + 25 * Math.sin(effectElapsed / 91 + index));
-      case "segment": return mod(Math.floor(index / 3) - Math.floor(effectElapsed / ANIMATION_STATUS_EFFECT_TICK_MS), 4) === 0 ? 105 : 0;
-      case "goo": return Math.round(20 + 48 * Math.sin(effectElapsed / 135 + index * 0.48));
-    }
-  };
-  return glyphs.map((glyph, index) => /\s/u.test(glyph)
-    ? glyph
-    : shader(glyph, amountFor(index))).join("") + "\x1b[39m";
-}
-
-/**
- * Adaptive renderer for the advanced widget. The old renderWorkingWidgetLines
- * below remains the compact public API; this renderer is what the widget uses.
- */
-export function renderAdvancedWorkingWidgetLines(
-  runtime: AnimationRuntime,
-  idle: boolean,
-  toolName: string | null,
-  width: number,
-  accentAnsi: string,
-  now: number = Date.now(),
-): string[] {
-  if (runtime.selected === "off" || width <= 0) return [];
-  const phase = transitionAnimationPhase(runtime, !idle, toolName, now);
-  const phaseAge = Math.max(0, now - (runtime.phaseStartedAt ?? now));
-  // Keep complete poses byte-identical between the 20 FPS render opportunities;
-  // lifecycle transitions still use the unquantized age for finite clamping.
-  const phaseElapsed = quantizeAnimationElapsed(phaseAge);
-  if (idle && phase === "idle") return [];
-  const exitDuration = Math.max(1, animationPhaseDuration(runtime.resolved, "exit"));
-  if (idle && phase === "exit" && phaseAge >= exitDuration) {
-    runtime.phase = "idle";
-    runtime.phaseStartedAt = now;
-    return [];
-  }
-
-  let expression = DEFAULT_TOOL_EXPRESSION;
-  if (!toolName) {
-    if (runtime.expressionIndex < 0 || now - runtime.expressionChangedAt >= 10_000) {
-      const previous = runtime.expressionIndex;
-      let next = Math.floor(Math.random() * THINKING_EXPRESSIONS.length);
-      if (THINKING_EXPRESSIONS.length > 1 && next === previous) next = (next + 1) % THINKING_EXPRESSIONS.length;
-      runtime.expressionIndex = next;
-      runtime.expressionChangedAt = now;
-    }
-    expression = THINKING_EXPRESSIONS[runtime.expressionIndex];
-  }
-  if (runtime.startedAt <= 0) runtime.startedAt = now;
-  const c: AnimColors = {
-    pulseOffset: 0,
-    shade: (text, amount) => shadeFgAnsi(accentAnsi, amount, text),
-    layer: (name, text, amount = 0) => {
-      const bias = name === "status" ? -5 : amount;
-      return shadeFgAnsi(accentAnsi, bias, text);
-    },
-  };
-  const tier = animationTier(width);
-  const targetPhase = phase as AnimationPhase;
-  const motionElapsed = Math.max(0, now - runtime.startedAt);
-  const statusElapsed = Math.floor(motionElapsed / ANIMATION_STATUS_EFFECT_TICK_MS) * ANIMATION_STATUS_EFFECT_TICK_MS;
-  const rows = selectAnimationRows(runtime.resolved, phaseElapsed, targetPhase);
-  const sprite = colorizeAnimationRows(rows, c, motionElapsed);
-  if (tier === "compact") {
-    // Use the phase's most expressive sprite row so enter/action/exit remain
-    // visibly distinct even when the full multi-line sprite cannot fit.
-    const compact = sprite[Math.floor(sprite.length / 2)]
-      ?? renderWorkingAnimation(runtime.resolved, motionElapsed, c);
-    const glyphBudget = Math.max(1, Math.min(visibleWidth(compact), Math.floor(width / 3)));
-    const glyphs = centerCropToWidth(compact, glyphBudget);
-    const separator = width > visibleWidth(glyphs) ? " " : "";
-    const expressionBudget = Math.max(0, width - visibleWidth(glyphs) - visibleWidth(separator));
-    const text = renderAnimationStatusText(
-      runtime.resolved,
-      expression,
-      statusElapsed,
-      accentAnsi,
-      expressionBudget,
-    );
-    return [ansiSafeLine(`${glyphs}${separator}${text}`, width)];
-  }
-  const body = tier === "full" ? sprite : sprite.filter((_line, index) => index === 0 || index === sprite.length - 1);
-  const output = body.map((line) => ansiSafeLine(line, width));
-  const statusText = toolName ? `${toolName}: ${expression}` : expression;
-  output.push(ansiSafeLine(
-    renderAnimationStatusText(runtime.resolved, statusText, statusElapsed, accentAnsi, width),
-    width,
-  ));
-  return output;
-}
-
 /** Render the insertion-ordered above-editor working widget. */
 export function renderWorkingWidgetLines(
   runtime: AnimationRuntime,
@@ -1576,9 +939,8 @@ export function renderWorkingWidgetLines(
     expression = THINKING_EXPRESSIONS[runtime.expressionIndex];
   }
 
-  const motionElapsed = quantizeAnimationElapsed(Math.max(0, now - runtime.startedAt));
-  const thinkOffset = Math.round(Math.sin(motionElapsed / 120) * 75);
-  const fullGlyphs = renderWorkingAnimation(runtime.resolved, motionElapsed, {
+  const thinkOffset = Math.round(Math.sin(now / 120) * 75);
+  const fullGlyphs = renderWorkingAnimation(runtime.resolved, now - runtime.startedAt, {
     shade: (text, amount) => shadeFgAnsi(accentAnsi, amount, text),
     pulseOffset: thinkOffset,
   });
@@ -1613,9 +975,12 @@ class WorkingAnimationWidget {
 
   private start(): void {
     if (this.timer || this.runtime.selected === "off") return;
+    this.runtime.startedAt = Date.now();
+    this.runtime.expressionIndex = -1;
+    this.runtime.expressionChangedAt = 0;
     this.timer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* widget may be detached */ }
-    }, WORKING_ANIMATION_TICK_MS);
+    }, 50);
     this.timer.unref?.();
   }
 
@@ -1623,24 +988,19 @@ class WorkingAnimationWidget {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.runtime.startedAt = 0;
-    this.runtime.expressionIndex = -1;
-    this.runtime.expressionChangedAt = 0;
   }
 
   render(width: number): string[] {
     const idle = this.ctx.isIdle();
-    const lines = renderAdvancedWorkingWidgetLines(
+    if (!idle && this.runtime.selected !== "off") this.start();
+    else this.stop();
+    return renderWorkingWidgetLines(
       this.runtime,
       idle,
       activeToolName,
       width,
       this.theme.getFgAnsi("accent"),
     );
-    // Keep the short exit animation alive, but never keep a background timer
-    // once the widget has reached its fully idle state.
-    if (this.runtime.selected !== "off" && (!idle || this.runtime.phase === "exit")) this.start();
-    else this.stop();
-    return lines;
   }
 
   invalidate(): void {}
@@ -1649,27 +1009,8 @@ class WorkingAnimationWidget {
 
 const ANIMATION_MENU_OPTIONS: readonly WorkingAnimationChoice[] = [...WORKING_ANIMATIONS, "random", "off"];
 const ANIMATION_MENU_VISIBLE_ROWS = 10;
-export const ANIMATION_PREVIEW_CYCLE_MS = 3_600;
 
-export function animationPreviewMoment(elapsed: number): { phase: AnimationPhase; elapsed: number } {
-  const cycleElapsed = ((elapsed % ANIMATION_PREVIEW_CYCLE_MS) + ANIMATION_PREVIEW_CYCLE_MS) % ANIMATION_PREVIEW_CYCLE_MS;
-  if (cycleElapsed < 600) return { phase: "enter", elapsed: cycleElapsed };
-  if (cycleElapsed < 1_800) return { phase: "idle", elapsed: cycleElapsed - 600 };
-  if (cycleElapsed < 2_800) return { phase: "action", elapsed: cycleElapsed - 1_800 };
-  return { phase: "exit", elapsed: cycleElapsed - 2_800 };
-}
-
-export function resolveAnimationPreviewOption(
-  option: WorkingAnimationChoice,
-  elapsed: number,
-): WorkingAnimation | null {
-  if (option === "off") return null;
-  if (option !== "random") return option;
-  const cycleIndex = Math.floor(Math.max(0, elapsed) / ANIMATION_PREVIEW_CYCLE_MS);
-  return WORKING_ANIMATIONS[cycleIndex % WORKING_ANIMATIONS.length];
-}
-
-/** Animated picker whose rows and selected panel use the advanced phase engine. */
+/** One-row-per-option animated picker used by the working-animation submenu. */
 export class AnimationPreviewMenu {
   private selectedIndex: number;
   private readonly startedAt = Date.now();
@@ -1702,64 +1043,20 @@ export class AnimationPreviewMenu {
     this.selectedIndex = currentIndex >= 0 ? currentIndex : 0;
     this.timer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* submenu may be detached */ }
-    }, ANIMATION_PREVIEW_TICK_MS);
+    }, 80);
     this.timer.unref?.();
   }
 
-  private previewResolved(option: WorkingAnimationChoice, elapsed: number): WorkingAnimation | null {
-    // random intentionally cycles in this menu only. The selected value is
-    // still resolved once by pickWorkingAnimation at session start.
-    return resolveAnimationPreviewOption(option, elapsed);
-  }
-
-  private previewSprite(option: WorkingAnimationChoice, elapsed: number): {
-    resolved: WorkingAnimation;
-    moment: { phase: AnimationPhase; elapsed: number };
-    lines: string[];
-  } | null {
-    const resolved = this.previewResolved(option, elapsed);
-    if (!resolved) return null;
-    const moment = animationPreviewMoment(elapsed);
-    const colors: AnimColors = {
-      shade: createAccentShader(this.theme.getFgAnsi("accent")),
-      pulseOffset: 0,
-    };
-    const lines = renderAdvancedAnimation(
-      resolved,
-      quantizeAnimationElapsed(moment.elapsed),
-      moment.phase,
-      colors,
-      quantizeAnimationElapsed(elapsed),
-    );
-    return { resolved, moment, lines };
-  }
-
   private preview(option: WorkingAnimationChoice, elapsed: number): string {
-    const sprite = this.previewSprite(option, elapsed);
-    if (!sprite) return this.theme.fg("dim", "(hidden)");
-    return sprite.lines[Math.floor(sprite.lines.length / 2)] ?? "";
-  }
-
-  private expandedPreview(option: WorkingAnimationChoice, elapsed: number, width: number): string[] {
-    const sprite = this.previewSprite(option, elapsed);
-    if (!sprite) return [this.theme.fg("dim", "  preview hidden (off)")];
-    const { resolved, moment, lines } = sprite;
-    const phaseLabel = moment.phase.toUpperCase();
-    const label = option === "random"
-      ? `  ${option} → ${resolved} · ${phaseLabel} · cycles each showcase`
-      : `  ${resolved} · ${phaseLabel} · live phased preview`;
-    const sampleStatus = renderAnimationStatusText(
-      resolved,
-      "thinking hard...",
-      Math.floor(elapsed / ANIMATION_STATUS_EFFECT_TICK_MS) * ANIMATION_STATUS_EFFECT_TICK_MS,
-      this.theme.getFgAnsi("accent"),
-      Math.max(0, width - 2),
-    );
-    return [
-      this.theme.fg("dim", label),
-      ...lines.slice(0, 3).map((line) => ansiSafeLine(line, width, false)),
-      ansiSafeLine(`  ${sampleStatus}`, width, false),
-    ];
+    if (option === "off") return this.theme.fg("dim", "(hidden)");
+    const resolved = option === "random"
+      ? WORKING_ANIMATIONS[Math.floor(elapsed / 800) % WORKING_ANIMATIONS.length]
+      : option;
+    const pulseOffset = Math.round(Math.sin(elapsed / 120) * 50);
+    return renderWorkingAnimation(resolved, elapsed, {
+      shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
+      pulseOffset,
+    });
   }
 
   render(width: number): string[] {
@@ -1787,12 +1084,8 @@ export class AnimationPreviewMenu {
     if (start > 0 || end < ANIMATION_MENU_OPTIONS.length) {
       lines.push(truncateToWidth(this.theme.fg("dim", `  (${this.selectedIndex + 1}/${ANIMATION_MENU_OPTIONS.length})`), width, ""));
     }
-    // Every row uses a phase-aware advanced sprite slice; the selected row
-    // also gets the full live panel. It is capped so SettingsList remains
-    // safe in a 24-row terminal even when the list scrolls.
-    lines.push(...this.expandedPreview(ANIMATION_MENU_OPTIONS[this.selectedIndex], elapsed, width));
     lines.push(truncateToWidth(this.theme.fg("dim", " ↑↓ preview · Enter choose · Esc back"), width, ""));
-    return lines.slice(0, Math.max(1, Math.min(23, lines.length))).map((line) => ansiSafeLine(line, width, false));
+    return lines;
   }
 
   handleInput(data: string): void {
@@ -1952,10 +1245,6 @@ class NerismaInputEditor extends CustomEditor {
   private _lastTokValue: number = -1;
   /** Metrics update counter (shown in parentheses after T). */
   private _metricUpdateCount: number = 0;
-  /** Session scans are expensive on long histories; animation renders reuse this snapshot. */
-  private _sessionStatsCache: SessionStatsSnapshot | undefined;
-  /** Forces one final metric scan when the agent transitions from active to idle. */
-  private _lastAgentIdle: boolean | undefined;
   /** Previous serialized value per element ID — used to detect changes for per-element pulse.
    *  Each ElementId carries its own metric (e.g. session-cost vs turn-cost are distinct ids),
    *  so the same value is produced wherever the id is placed and keying by id can't collide. */
@@ -2021,7 +1310,6 @@ class NerismaInputEditor extends CustomEditor {
         try { this.tui.requestRender(); } catch { /* editor may be detached */ }
       }
     }, 1000);
-    this._statusTimer.unref?.();
   }
 
   private _stopStatusPolling() {
@@ -2036,7 +1324,6 @@ class NerismaInputEditor extends CustomEditor {
     this._inputTimer = setInterval(() => {
       try { this.tui.requestRender(); } catch {}
     }, 50);
-    this._inputTimer.unref?.();
   }
 
   private _stopInputAnimation() {
@@ -2052,7 +1339,6 @@ class NerismaInputEditor extends CustomEditor {
     this._dynamicWorkflowTimer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* editor may be detached */ }
     }, 50);
-    this._dynamicWorkflowTimer.unref?.();
   }
 
   private _stopDynamicWorkflowAnimation() {
@@ -2301,7 +1587,6 @@ class NerismaInputEditor extends CustomEditor {
             }
             try { this.tui.requestRender(); } catch {}
           }, 16);
-          this._submitTimer.unref?.();
         }
       }
       this._lastInputText = currentText;
@@ -2369,6 +1654,7 @@ class NerismaInputEditor extends CustomEditor {
     const promptColorFn = borderColorFn;
 
     // ── Session metrics (single computation, shared by all quadrants) ──
+    let entries: readonly any[] = [];
     let sessionElapsed = 0;
     let toolCount = 0;
     let tokEstimate = 0;
@@ -2381,21 +1667,15 @@ class NerismaInputEditor extends CustomEditor {
     };
 
     try {
-      const agentIdle = Boolean(ctx.isIdle?.());
-      const forceFinalMetrics = agentIdle && this._lastAgentIdle === false;
-      this._lastAgentIdle = agentIdle;
-      this._sessionStatsCache = refreshSessionStatsSnapshot(
-        this._sessionStatsCache,
-        now,
-        () => ctx.sessionManager?.getEntries?.() ?? [],
-        forceFinalMetrics,
-      );
-      metrics = this._sessionStatsCache.metrics;
-      sessionInfo = this._sessionStatsCache.sessionInfo;
+      entries = ctx.sessionManager?.getEntries?.() ?? [];
+      metrics = computeSessionMetrics(entries);
+      const info = computeSessionInfo(entries);
+      sessionInfo = info;
       hasAssistantResponse = metrics !== null && metrics.output > 0;
-      turnCount = sessionInfo.turnCount;
-      sessionElapsed = sessionInfo.sessionStartTs ? Math.round((now - sessionInfo.sessionStartTs) / 1000) : 0;
-      toolCount = effectiveToolNames(pi).length;
+      turnCount = info.turnCount;
+      sessionElapsed = info.sessionStartTs ? Math.round((Date.now() - info.sessionStartTs) / 1000) : 0;
+      const wireTools = effectiveToolNames(pi);
+      toolCount = wireTools.length;
       tokEstimate = estimateTokens(this.getText());
       const usage = ctx.getContextUsage();
       if (usage) {
@@ -2424,7 +1704,6 @@ class NerismaInputEditor extends CustomEditor {
             }
             try { this.tui.requestRender(); } catch {}
           }, 16);
-          this._metricTimer.unref?.();
         }
       }
     } else if (!configAnim.metricPulse) {
@@ -2433,15 +1712,27 @@ class NerismaInputEditor extends CustomEditor {
     }
 
     // ── Last turn tracking ──────────────────────────────
-    const lastTurn = this._sessionStatsCache?.lastTurn ?? null;
+    const lastTurn = computeLastTurnMetrics(entries);
     if (hasAssistantResponse && lastTurn && sessionInfo) {
+      const turnDuration = (() => {
+        const luts = sessionInfo.lastPromptTs;
+        if (!luts) return "";
+        for (let i = entries.length - 1; i >= 0; i--) {
+          const e = entries[i];
+          if (e.type === "message" && e.message?.role === "assistant") {
+            const ts = new Date(e.timestamp).getTime();
+            if (!isNaN(ts)) return formatDuration(Math.round((ts - luts) / 1000));
+          }
+        }
+        return "";
+      })();
       this._lastCompletedTurn = {
         turnNum: turnCount > 0 ? turnCount : 0,
         cost: lastTurn.cost,
         output: lastTurn.output,
         cacheRead: lastTurn.cacheRead,
         input: lastTurn.input,
-        duration: this._sessionStatsCache?.turnDuration ?? "",
+        duration: turnDuration,
       };
     }
 
@@ -2464,7 +1755,6 @@ class NerismaInputEditor extends CustomEditor {
             }
             try { this.tui.requestRender(); } catch {}
           }, 16);
-          this._tokTimer.unref?.();
         }
       }
     } else if (!configAnim.tokPulse) {
@@ -2607,9 +1897,7 @@ export default function (pi: ExtensionAPI): void {
   const config = loadConfig();
   const animationRuntime: AnimationRuntime = {
     selected: config.animations.working,
-    resolved: config.animations.working === "random"
-      ? (config.animations.lastWorking ?? WORKING_ANIMATIONS[0])
-      : pickWorkingAnimation(config.animations.working, config.animations.lastWorking),
+    resolved: pickWorkingAnimation(config.animations.working, config.animations.lastWorking),
     startedAt: 0,
     expressionIndex: -1,
     expressionChangedAt: 0,
@@ -2643,10 +1931,17 @@ export default function (pi: ExtensionAPI): void {
     lastWirePayloadTools = findToolsArray(event.payload);
   });
 
-  pi.on("session_start", (event, ctx) => {
-    // Resolve random once for a real session start/switch, but preserve the
-    // current session's persisted choice across /reload.
-    if (resolveAnimationForSession(config, animationRuntime, event.reason)) saveConfig(config);
+  pi.on("session_start", (_event, ctx) => {
+    // Resolve random once per session, never per render or per working turn.
+    animationRuntime.selected = config.animations.working;
+    animationRuntime.resolved = pickWorkingAnimation(
+      animationRuntime.selected,
+      config.animations.lastWorking ?? animationRuntime.resolved,
+    );
+    if (animationRuntime.selected === "random") {
+      config.animations.lastWorking = animationRuntime.resolved;
+      saveConfig(config);
+    }
     if (registered) return;
     registered = true;
 
@@ -2679,17 +1974,10 @@ export default function (pi: ExtensionAPI): void {
 
   // Track the running tool for the animated expressions.
   pi.on("tool_execution_start", (event) => {
-    activeToolNames.set(event.toolCallId, event.toolName);
     activeToolName = event.toolName;
   });
 
-  pi.on("tool_execution_end", (event) => {
-    activeToolNames.delete(event.toolCallId);
-    activeToolName = [...activeToolNames.values()].at(-1) ?? null;
-  });
-
-  pi.on("session_shutdown", () => {
-    activeToolNames.clear();
+  pi.on("tool_execution_end", () => {
     activeToolName = null;
   });
 }

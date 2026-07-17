@@ -9,19 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Animation-specific, theme-safe thinking/tool text effects (ripple, orbit, scan, bounce,
-  twinkle, flutter, triad, streak, pixel, glow, shadow, flicker, segment, and goo), including
-  grapheme-safe clipping, animated ANSI-16/custom-color fallback, and matching live sample
-  text in the selected settings preview.
-- Terminal-render-aware animation pacing: widget/settings update at 10 FPS, complete poses hold for
-  100–238 ms, matching text effects advance at 4 FPS, and held-pose ANSI output remains byte-stable.
-  This prevents Pi's raw-line diff from clearing/repainting unchanged rows; one-second session-metric
-  caching also avoids repeated full-history scans. Geometry never tears, conceals, or hybridizes.
-- A typed advanced animation engine with variable frame durations, enter/idle/action/exit
-  phases, theme-safe named color layers, and full/condensed/compact terminal tiers.
-- Live multi-line selected-row panels plus phase-aware advanced sprite art in every animation
-  submenu row; the showcase cycles enter/idle/action/exit, `random` changes after each full
-  preview cycle and resolves once per session, and `off` shows its hidden state.
 - Selectable working animations: `wave`, `orbit`, `scanner`, `bounce`,
   `sparkle`, `fairy`, `triforce`, `speedster`, `invader`, `aura`, `ninja`,
   `flame`, `mecha`, and `slime`.

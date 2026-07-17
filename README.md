@@ -150,43 +150,6 @@ editor row. Pi orders these widgets by registration time: to keep the animation
 above active legacy-subagent and dynamic-workflow boxes, list this package before
 `pi-interactive-subagents` in `settings.json` (the portable config does this).
 
-### Advanced sprite engine
-
-Working animations now use a typed, reusable frame model with variable frame durations and
-`enter`, `idle`, `action`, and `exit` phases. The renderer selects a theme-safe named layer
-(shadow, body, highlight, face, spark, or status) and adapts to the terminal: wide displays
-get a full multi-line sprite and expression, medium displays get a condensed sprite, and
-narrow displays retain the meaningful centered one-line renderer. ANSI output is clipped and
-closed at the requested width.
-
-While pi is reasoning the sprite runs its idle loop; tool execution switches to the action
-loop, and becoming idle plays a short melt/fade exit before the widget is removed. Timers are
-unref'd and disposed on widget removal or settings teardown, so a fully idle session has no
-animation timer. **slime** is the showcase treatment: a blue-isekai-inspired round body with
-face, highlights, wobble, squash/stretch, action bounce, and melt/pop exit frames. Fairy,
-aura, mecha, flame, invader, and triforce also have dedicated multi-line treatments; the
-remaining effects use a validated generic wrapper.
-
-The adjacent thinking/tool text is animated by a matching width-preserving shader: wave
-ripples, orbit highlights circle the phrase, scanner sweeps, bounce pulses, sparkle and fairy
-twinkle, triforce moves in triads, speedster leaves a fast streak, invader blinks in pixels,
-aura breathes, ninja reveals from shadow, flame flickers, mecha scans in segments, and slime
-undulates like goo. These effects retain exact grapheme clusters and terminal width—including
-combining marks, flags, ZWJ emoji, and CJK—and use only the active theme accent. Truecolor and
-256-color accents receive brightness animation; ANSI-16 and custom accents receive a safe
-bold/dim intensity fallback. The selected settings preview includes the matching sample text.
-
-The Working animation submenu now drives every row from the same advanced sprite engine and
-adds a full live panel for the selected row. Widget and preview request updates at 10 FPS, full
-sprite poses use a deliberately gentle 100–238 ms cadence, and matching text effects advance at
-4 FPS. ANSI colors remain byte-identical throughout a held pose, so unrelated Pi renders do not
-clear and rewrite unchanged terminal rows. Geometry never tears row-by-row, blends hybrid glyphs,
-or hides for a crossfade. The editor also caches full-session metric scans for one second, avoiding
-repeated history allocation/scans on animation renders. Its repeating showcase visibly steps through
-`ENTER`, `IDLE`, `ACTION`, and `EXIT`, so the picker previews the actual phased art rather than
-the legacy one-line loop. `random` changes examples after each complete showcase (but resolves
-once per actual pi session), and `off` explicitly previews the hidden state.
-
 ## How it works
 
 The extension registers a custom editor on `session_start` (and hides the
