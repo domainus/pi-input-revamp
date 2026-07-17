@@ -156,6 +156,11 @@ test("advanced sprite rows share one centered canvas across every frame and phas
     }
   }
 
+  assert.equal(
+    getAnimationDefinition("mecha").frames,
+    getAnimationDefinition("mecha").frames,
+    "normalized dedicated frames should be cached across animation renders",
+  );
   const mechaAction = getAnimationDefinition("mecha").frames.find((frame) => frame.semantic === "mecha-action")!;
   const actionCanvas = visibleWidth(mechaAction.lines[0]);
   assert.deepEqual(mechaAction.lines.map((line) => visibleWidth(line)), [actionCanvas, actionCanvas, actionCanvas]);

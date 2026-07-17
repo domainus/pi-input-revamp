@@ -832,10 +832,14 @@ const ADVANCED_SPRITES: Partial<Record<WorkingAnimation, readonly AnimationFrame
  * animation. This happens before ANSI coloring so terminal width and clipping
  * remain deterministic.
  */
+const normalizedAnimationFramesCache = new WeakMap<readonly AnimationFrame[], readonly AnimationFrame[]>();
+
 export function normalizeAnimationFrames(frames: readonly AnimationFrame[]): readonly AnimationFrame[] {
+  const cached = normalizedAnimationFramesCache.get(frames);
+  if (cached) return cached;
   const trimmed = frames.map((frame) => frame.lines.map((line) => line.trim()));
   const canvasWidth = Math.max(0, ...trimmed.flatMap((lines) => lines.map((line) => visibleWidth(line))));
-  return frames.map((frame, frameIndex) => ({
+  const normalized = frames.map((frame, frameIndex) => ({
     ...frame,
     lines: trimmed[frameIndex].map((line) => {
       const lineWidth = visibleWidth(line);
@@ -843,6 +847,8 @@ export function normalizeAnimationFrames(frames: readonly AnimationFrame[]): rea
       return `${" ".repeat(left)}${line}${" ".repeat(canvasWidth - left - lineWidth)}`;
     }),
   }));
+  normalizedAnimationFramesCache.set(frames, normalized);
+  return normalized;
 }
 
 function animationFrames(animation: WorkingAnimation): readonly AnimationFrame[] {
