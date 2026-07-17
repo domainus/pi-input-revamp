@@ -547,16 +547,29 @@ function parseFgAnsi(ansi: string): { rgb: [number, number, number]; mode: "true
  * (±RGB per channel). Re-emits in the original mode (truecolor or 256), so the
  * pulse works in both.
  */
+function createAccentShader(baseAnsi: string): (text: string, amount: number) => string {
+  const parsed = parseFgAnsi(baseAnsi);
+  if (!parsed) {
+    // ANSI-16, empty, and custom theme sequences cannot be RGB-shifted safely.
+    // Preserve the supplied accent and animate intensity instead of becoming static.
+    return (text, amount) => {
+      const intensity = amount >= 65 ? "\x1b[1m" : amount <= -15 ? "\x1b[2m" : "\x1b[22m";
+      return `${intensity}${baseAnsi}${text}\x1b[22;39m`;
+    };
+  }
+  return (text, amount) => {
+    const r = Math.max(0, Math.min(255, parsed.rgb[0] + amount));
+    const g = Math.max(0, Math.min(255, parsed.rgb[1] + amount));
+    const b = Math.max(0, Math.min(255, parsed.rgb[2] + amount));
+    const open = parsed.mode === "truecolor"
+      ? `\x1b[38;2;${r};${g};${b}m`
+      : `\x1b[38;5;${rgbTo256(r, g, b)}m`;
+    return `${open}${text}\x1b[39m`;
+  };
+}
+
 function shadeFgAnsi(baseAnsi: string, amount: number, text: string): string {
-  const p = parseFgAnsi(baseAnsi);
-  if (!p) return `${baseAnsi}${text}\x1b[39m`; // unknown format → raw accent
-  const r = Math.max(0, Math.min(255, p.rgb[0] + amount));
-  const g = Math.max(0, Math.min(255, p.rgb[1] + amount));
-  const b = Math.max(0, Math.min(255, p.rgb[2] + amount));
-  const open = p.mode === "truecolor"
-    ? `\x1b[38;2;${r};${g};${b}m`
-    : `\x1b[38;5;${rgbTo256(r, g, b)}m`;
-  return `${open}${text}\x1b[39m`;
+  return createAccentShader(baseAnsi)(text, amount);
 }
 
 /**
@@ -1182,6 +1195,90 @@ function transitionAnimationPhase(runtime: AnimationRuntime, active: boolean, to
   return runtime.phase;
 }
 
+export type AnimationTextEffect = "ripple" | "orbit" | "scan" | "bounce" | "twinkle"
+  | "flutter" | "triad" | "streak" | "pixel" | "glow" | "shadow"
+  | "flicker" | "segment" | "goo";
+
+export const ANIMATION_TEXT_EFFECTS: Readonly<Record<WorkingAnimation, AnimationTextEffect>> = {
+  wave: "ripple",
+  orbit: "orbit",
+  scanner: "scan",
+  bounce: "bounce",
+  sparkle: "twinkle",
+  fairy: "flutter",
+  triforce: "triad",
+  speedster: "streak",
+  invader: "pixel",
+  aura: "glow",
+  ninja: "shadow",
+  flame: "flicker",
+  mecha: "segment",
+  slime: "goo",
+};
+
+const graphemeSegmenter = typeof (Intl as any).Segmenter === "function"
+  ? new (Intl as any).Segmenter(undefined, { granularity: "grapheme" })
+  : null;
+
+function splitGraphemes(text: string): string[] {
+  if (!graphemeSegmenter) return Array.from(text);
+  return Array.from(graphemeSegmenter.segment(text), (part: any) => part.segment as string);
+}
+
+function clipGraphemesToWidth(text: string, maxWidth: number): string {
+  if (!Number.isFinite(maxWidth)) return text;
+  let width = 0;
+  let output = "";
+  for (const grapheme of splitGraphemes(text)) {
+    const graphemeWidth = visibleWidth(grapheme);
+    if (width + graphemeWidth > Math.max(0, maxWidth)) break;
+    output += grapheme;
+    width += graphemeWidth;
+  }
+  return output;
+}
+
+/** Theme-safe, grapheme-safe, width-preserving character shader paired with each sprite. */
+export function renderAnimationStatusText(
+  animation: WorkingAnimation,
+  text: string,
+  elapsed: number,
+  accentAnsi: string,
+  maxWidth: number = Number.POSITIVE_INFINITY,
+): string {
+  const glyphs = splitGraphemes(clipGraphemesToWidth(text, maxWidth));
+  const shader = createAccentShader(accentAnsi);
+  const count = Math.max(1, glyphs.length);
+  const tick = Math.floor(Math.max(0, elapsed) / 50);
+  const mod = (value: number, base: number) => ((value % base) + base) % base;
+  const beamDistance = (index: number, speed: number) => {
+    const beam = mod(Math.floor(Math.max(0, elapsed) / speed), count);
+    const direct = Math.abs(index - beam);
+    return Math.min(direct, count - direct);
+  };
+  const amountFor = (index: number): number => {
+    switch (ANIMATION_TEXT_EFFECTS[animation]) {
+      case "ripple": return Math.round(15 + 55 * Math.sin(elapsed / 95 + index * 0.72));
+      case "orbit": return beamDistance(index, 70) <= 1 ? 105 : -20;
+      case "scan": return Math.max(-35, 110 - beamDistance(index, 45) * 45);
+      case "bounce": return Math.round(-20 + 90 * Math.abs(Math.sin(elapsed / 105 + index * 0.32)));
+      case "twinkle": return mod(index * 7 + tick, 6) === 0 ? 125 : Math.round(5 + 25 * Math.sin(index + elapsed / 180));
+      case "flutter": return Math.round(25 + 45 * Math.sin(elapsed / 80 + index * 1.35));
+      case "triad": return mod(index - Math.floor(elapsed / 160), 3) === 0 ? 110 : 5;
+      case "streak": return Math.max(-30, 120 - beamDistance(index, 32) * 34);
+      case "pixel": return mod(index + Math.floor(elapsed / 110), 2) === 0 ? 75 : -20;
+      case "glow": return Math.round(30 + 55 * Math.sin(elapsed / 150) + 18 * Math.cos(index * 0.45));
+      case "shadow": return beamDistance(index, 95) === 0 ? 95 : -45;
+      case "flicker": return Math.round(35 + 45 * Math.sin(elapsed / 52 + index * 2.1) + 25 * Math.sin(elapsed / 91 + index));
+      case "segment": return mod(Math.floor(index / 3) - Math.floor(elapsed / 120), 4) === 0 ? 105 : 0;
+      case "goo": return Math.round(20 + 48 * Math.sin(elapsed / 135 + index * 0.48));
+    }
+  };
+  return glyphs.map((glyph, index) => /\s/u.test(glyph)
+    ? glyph
+    : shader(glyph, amountFor(index))).join("") + "\x1b[39m";
+}
+
 /**
  * Adaptive renderer for the advanced widget. The old renderWorkingWidgetLines
  * below remains the compact public API; this renderer is what the widget uses.
@@ -1235,13 +1332,22 @@ export function renderAdvancedWorkingWidgetLines(
     const glyphs = centerCropToWidth(compact, glyphBudget);
     const separator = width > visibleWidth(glyphs) ? " " : "";
     const expressionBudget = Math.max(0, width - visibleWidth(glyphs) - visibleWidth(separator));
-    const text = truncateToWidth(c.shade(expression, c.pulseOffset), expressionBudget, "");
+    const text = renderAnimationStatusText(
+      runtime.resolved,
+      expression,
+      phaseElapsed,
+      accentAnsi,
+      expressionBudget,
+    );
     return [ansiSafeLine(`${glyphs}${separator}${text}`, width)];
   }
   const body = tier === "full" ? sprite : sprite.filter((_line, index) => index === 0 || index === sprite.length - 1);
   const output = body.map((line) => ansiSafeLine(line, width));
-  const status = c.layer?.("status", toolName ? `${toolName}: ${expression}` : expression, -5) ?? expression;
-  output.push(ansiSafeLine(status, width));
+  const statusText = toolName ? `${toolName}: ${expression}` : expression;
+  output.push(ansiSafeLine(
+    renderAnimationStatusText(runtime.resolved, statusText, phaseElapsed, accentAnsi, width),
+    width,
+  ));
   return output;
 }
 
@@ -1433,7 +1539,18 @@ export class AnimationPreviewMenu {
     const label = option === "random"
       ? `  ${option} → ${resolved} · ${phaseLabel} · cycles each showcase`
       : `  ${resolved} · ${phaseLabel} · live phased preview`;
-    return [this.theme.fg("dim", label), ...lines.slice(0, 3).map((line) => ansiSafeLine(line, width, false))];
+    const sampleStatus = renderAnimationStatusText(
+      resolved,
+      "thinking hard...",
+      moment.elapsed,
+      this.theme.getFgAnsi("accent"),
+      Math.max(0, width - 2),
+    );
+    return [
+      this.theme.fg("dim", label),
+      ...lines.slice(0, 3).map((line) => ansiSafeLine(line, width, false)),
+      ansiSafeLine(`  ${sampleStatus}`, width, false),
+    ];
   }
 
   render(width: number): string[] {

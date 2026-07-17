@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Animation-specific, theme-safe thinking/tool text effects (ripple, orbit, scan, bounce,
+  twinkle, flutter, triad, streak, pixel, glow, shadow, flicker, segment, and goo), including
+  grapheme-safe clipping, animated ANSI-16/custom-color fallback, and matching live sample
+  text in the selected settings preview.
 - Smoother animation pacing with a 30 FPS working-widget cadence, 25 FPS settings preview,
   and shorter keyframe holds capped near 124 ms to eliminate visible input-settings stutter.
 - A typed advanced animation engine with variable frame durations, enter/idle/action/exit

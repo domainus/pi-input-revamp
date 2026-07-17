@@ -10,6 +10,7 @@ import installInputRevamp, {
   ANIMATION_PREVIEW_TICK_MS,
   ANIMATION_FRAME_TIME_SCALE,
   WORKING_ANIMATION_TICK_MS,
+  ANIMATION_TEXT_EFFECTS,
   animationPreviewMoment,
   resolveAnimationPreviewOption,
   INPUT_SETTINGS_VISIBLE_ROWS,
@@ -27,6 +28,7 @@ import installInputRevamp, {
   renderWorkingWidgetLines,
   renderAdvancedAnimation,
   renderAdvancedWorkingWidgetLines,
+  renderAnimationStatusText,
   resolveAnimationForSession,
   animationTier,
   getAnimationDefinition,
@@ -115,6 +117,46 @@ test("animation cadence avoids long frame holds and low-refresh preview stutter"
     const durations = getAnimationDefinition(animation).frames.map((frame) => frame.duration);
     assert.ok(Math.max(...durations) <= 124, `${animation} retained a ${Math.max(...durations)}ms frame hold`);
   }
+});
+
+test("every animation has a distinct width-safe animated thinking-text effect", () => {
+  assert.equal(new Set(Object.values(ANIMATION_TEXT_EFFECTS)).size, WORKING_ANIMATIONS.length);
+  const sample = "thinking hard...";
+  const times = [0, 40, 80, 120, 160, 240, 360, 520];
+  for (const color of [accent, "\x1b[38;5;33m"]) {
+    const signatures = WORKING_ANIMATIONS.map((animation) => JSON.stringify(
+      times.map((elapsed) => renderAnimationStatusText(animation, sample, elapsed, color)),
+    ));
+    assert.equal(new Set(signatures).size, WORKING_ANIMATIONS.length, `effects collapsed for ${JSON.stringify(color)}`);
+  }
+  for (const animation of WORKING_ANIMATIONS) {
+    const first = renderAnimationStatusText(animation, sample, 0, accent);
+    const later = renderAnimationStatusText(animation, sample, 160, accent);
+    assert.equal(stripAnsi(first), sample, `${animation} changed status text`);
+    assert.equal(visibleWidth(first), visibleWidth(sample), `${animation} changed status width`);
+    assert.match(first, /\x1b\[39m$/, `${animation} did not close its ANSI foreground`);
+    assert.notEqual(later, first, `${animation} status effect did not animate`);
+    for (const fallbackAccent of ["", "\x1b[31m", "\x1b[94m"]) {
+      const fallbackFrames = times.map((elapsed) => renderAnimationStatusText(animation, sample, elapsed, fallbackAccent));
+      assert.ok(new Set(fallbackFrames).size > 1, `${animation} became static for fallback accent`);
+    }
+  }
+});
+
+test("thinking-text shaders preserve and clip complete grapheme clusters", () => {
+  const graphemes = ["e\u0301", "🇺🇸", "👩🏽‍💻", "漢"];
+  const sample = `A ${graphemes.join(" ")} Z`;
+  const rendered = renderAnimationStatusText("fairy", sample, 160, accent);
+  assert.equal(stripAnsi(rendered), sample);
+  for (const grapheme of graphemes) {
+    assert.ok(rendered.includes(grapheme), `ANSI split grapheme ${grapheme}`);
+  }
+  const clipSample = "A👩🏽‍💻B";
+  const budget = visibleWidth("A👩🏽‍💻");
+  const clipped = renderAnimationStatusText("slime", clipSample, 160, accent, budget);
+  assert.equal(stripAnsi(clipped), "A👩🏽‍💻");
+  assert.equal(visibleWidth(clipped), budget);
+  assert.equal(stripAnsi(renderAnimationStatusText("wave", "A漢B", 80, accent, 3)), "A漢");
 });
 
 test("all dedicated advanced sprites remain bounded in every lifecycle phase", () => {
@@ -284,7 +326,8 @@ test("animation submenu renders live previews and returns the selected option", 
   const first = menu.render(32);
   assert.ok(first.some((line) => line.includes("fairy")));
   assert.ok(first.some((line) => line.includes("fairy · ENTER")));
-  assert.ok(first.length >= 14, "selected row did not receive a multi-line preview panel");
+  assert.ok(first.some((line) => stripAnsi(line).includes("thinking hard...")), "selected preview omitted its text effect");
+  assert.ok(first.length >= 15, "selected row did not receive sprite and text-effect preview lines");
   const slimeMenu = new AnimationPreviewMenu(
     { requestRender() {} } as any,
     {
@@ -318,6 +361,11 @@ test("animation submenu renders live previews and returns the selected option", 
   await new Promise((resolve) => setTimeout(resolve, 90));
   assert.ok(requestedRenders > 0);
   assert.notDeepEqual(menu.render(32), first, "submenu previews did not animate");
+  for (const width of [1, 17, 18]) {
+    const boundaryLines = menu.render(width);
+    assert.ok(boundaryLines.every((line) => visibleWidth(line) <= width), `preview overflowed width ${width}`);
+    assert.ok(boundaryLines.filter((line) => line.includes("\x1b[")).every((line) => line.endsWith("\x1b[0m")), `preview leaked ANSI at width ${width}`);
+  }
   menu.handleInput("down");
   menu.handleInput("enter");
   assert.equal(selected, "triforce");
@@ -492,7 +540,7 @@ test("session start registers the animation as an early above-editor widget", as
     handlers.get("tool_execution_start")?.[0]?.({ toolCallId: "b", toolName: "read" }, ctx);
     handlers.get("tool_execution_end")?.[0]?.({ toolCallId: "b", toolName: "read" }, ctx);
     const parallelToolLines = component.render(40);
-    assert.match(parallelToolLines.at(-1) ?? "", /bash:/, "ending one parallel tool cleared the remaining action state");
+    assert.match(stripAnsi(parallelToolLines.at(-1) ?? ""), /bash:/, "ending one parallel tool cleared the remaining action state");
     await new Promise((resolve) => setTimeout(resolve, 70));
     assert.ok(requestedRenders > 0, "widget timer never requested a render");
     idle = true;

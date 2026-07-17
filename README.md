@@ -167,6 +167,15 @@ face, highlights, wobble, squash/stretch, action bounce, and melt/pop exit frame
 aura, mecha, flame, invader, and triforce also have dedicated multi-line treatments; the
 remaining effects use a validated generic wrapper.
 
+The adjacent thinking/tool text is animated by a matching width-preserving shader: wave
+ripples, orbit highlights circle the phrase, scanner sweeps, bounce pulses, sparkle and fairy
+twinkle, triforce moves in triads, speedster leaves a fast streak, invader blinks in pixels,
+aura breathes, ninja reveals from shadow, flame flickers, mecha scans in segments, and slime
+undulates like goo. These effects retain exact grapheme clusters and terminal width—including
+combining marks, flags, ZWJ emoji, and CJK—and use only the active theme accent. Truecolor and
+256-color accents receive brightness animation; ANSI-16 and custom accents receive a safe
+bold/dim intensity fallback. The selected settings preview includes the matching sample text.
+
 The Working animation submenu now drives every row from the same advanced sprite engine and
 adds a full live panel for the selected row. A 25 FPS preview cadence and shortened keyframe
 holds keep the richer terminal art responsive instead of visibly stuttering. Its repeating showcase visibly steps through
