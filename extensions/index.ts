@@ -547,25 +547,50 @@ function parseFgAnsi(ansi: string): { rgb: [number, number, number]; mode: "true
  * (±RGB per channel). Re-emits in the original mode (truecolor or 256), so the
  * pulse works in both.
  */
-function createAccentShader(baseAnsi: string): (text: string, amount: number) => string {
+type AccentShader = (text: string, amount: number) => string;
+type AccentFadeShader = (text: string, amount: number, opacity: number) => string;
+const accentShaderCache = new Map<string, { shade: AccentShader; fade: AccentFadeShader }>();
+
+function createAccentShaders(baseAnsi: string): { shade: AccentShader; fade: AccentFadeShader } {
+  const cached = accentShaderCache.get(baseAnsi);
+  if (cached) return cached;
   const parsed = parseFgAnsi(baseAnsi);
-  if (!parsed) {
-    // ANSI-16, empty, and custom theme sequences cannot be RGB-shifted safely.
-    // Preserve the supplied accent and animate intensity instead of becoming static.
-    return (text, amount) => {
-      const intensity = amount >= 65 ? "\x1b[1m" : amount <= -15 ? "\x1b[2m" : "\x1b[22m";
-      return `${intensity}${baseAnsi}${text}\x1b[22;39m`;
-    };
-  }
-  return (text, amount) => {
-    const r = Math.max(0, Math.min(255, parsed.rgb[0] + amount));
-    const g = Math.max(0, Math.min(255, parsed.rgb[1] + amount));
-    const b = Math.max(0, Math.min(255, parsed.rgb[2] + amount));
-    const open = parsed.mode === "truecolor"
-      ? `\x1b[38;2;${r};${g};${b}m`
-      : `\x1b[38;5;${rgbTo256(r, g, b)}m`;
-    return `${open}${text}\x1b[39m`;
+  const shade: AccentShader = !parsed
+    ? (text: string, amount: number) => {
+        // ANSI-16, empty, and custom theme sequences cannot be RGB-shifted safely.
+        // Preserve the supplied accent and animate intensity instead of becoming static.
+        const intensity = amount >= 65 ? "\x1b[1m" : amount <= -15 ? "\x1b[2m" : "\x1b[22m";
+        return `${intensity}${baseAnsi}${text}\x1b[22;39m`;
+      }
+    : (text: string, amount: number) => {
+        const r = Math.max(0, Math.min(255, parsed.rgb[0] + amount));
+        const g = Math.max(0, Math.min(255, parsed.rgb[1] + amount));
+        const b = Math.max(0, Math.min(255, parsed.rgb[2] + amount));
+        const open = parsed.mode === "truecolor"
+          ? `\x1b[38;2;${r};${g};${b}m`
+          : `\x1b[38;5;${rgbTo256(r, g, b)}m`;
+        return `${open}${text}\x1b[39m`;
+      };
+  const fade: AccentFadeShader = (text, amount, opacity) => {
+    const alpha = Math.max(0, Math.min(1, opacity));
+    if (alpha >= 0.98) return shade(text, amount);
+    if (alpha <= 0.08) return `${baseAnsi}\x1b[8m${text}\x1b[28;22;39m`;
+    const intensity = alpha < 0.72 ? "\x1b[2m" : "\x1b[22m";
+    if (!parsed) {
+      // Emit intensity after custom/ANSI-16 color so the normal layer shader
+      // cannot override opacity with bold or a reset.
+      return `${baseAnsi}${intensity}${text}\x1b[22;39m`;
+    }
+    return `${intensity}${shade(text, Math.round(amount * alpha - (1 - alpha) * 55))}\x1b[22m`;
   };
+  const shaders = { shade, fade };
+  if (accentShaderCache.size >= 16) accentShaderCache.clear();
+  accentShaderCache.set(baseAnsi, shaders);
+  return shaders;
+}
+
+function createAccentShader(baseAnsi: string): AccentShader {
+  return createAccentShaders(baseAnsi).shade;
 }
 
 function shadeFgAnsi(baseAnsi: string, amount: number, text: string): string {
@@ -653,9 +678,21 @@ export interface AnimationColors {
   pulseOffset: number;
   /** Optional named layer renderer used by the advanced sprite engine. */
   layer?: (name: AnimationColorLayer, s: string, amount?: number) => string;
+  /** Independent transition fade; opacity 0 must hide the glyph regardless of layer brightness. */
+  fade?: (name: AnimationColorLayer, s: string, amount: number, opacity: number) => string;
 }
 
 type AnimColors = AnimationColors;
+
+export function createAnimationColors(accentAnsi: string, pulseOffset: number): AnimationColors {
+  const shaders = createAccentShaders(accentAnsi);
+  return {
+    pulseOffset,
+    shade: shaders.shade,
+    layer: (_name, text, amount = 0) => shaders.shade(text, amount),
+    fade: (_name, text, amount, opacity) => shaders.fade(text, amount, opacity),
+  };
+}
 
 /** Lifecycle phases shared by every advanced working-animation definition. */
 export type AnimationPhase = "enter" | "idle" | "action" | "exit";
@@ -688,7 +725,7 @@ export type AnimationTier = "full" | "condensed" | "compact";
 
 /** Terminal-friendly 30 FPS cadence with shorter frame holds to avoid visible stutter. */
 export const WORKING_ANIMATION_TICK_MS = 33;
-export const ANIMATION_PREVIEW_TICK_MS = 40;
+export const ANIMATION_PREVIEW_TICK_MS = 33;
 export const ANIMATION_FRAME_TIME_SCALE = 0.65;
 
 function spriteFrame(
@@ -816,7 +853,47 @@ export function selectAnimationFrame(
   return available[available.length - 1];
 }
 
-function colorizeSpriteLine(line: string, c: AnimColors, frame: AnimationFrame): string {
+export interface AnimationFrameTransition {
+  readonly current: AnimationFrame;
+  readonly next: AnimationFrame;
+  readonly progress: number;
+}
+
+export function sampleAnimationFrameTransition(
+  animation: WorkingAnimation,
+  elapsed: number,
+  phase: AnimationPhase = "idle",
+): AnimationFrameTransition {
+  const phaseFrames = animationFrames(animation).filter((frame) => frame.phase === phase);
+  const available = phaseFrames.length > 0
+    ? phaseFrames
+    : animationFrames(animation).filter((frame) => frame.phase === "idle");
+  const frames = available.length > 0 ? available : [animationFrames(animation)[0]];
+  const total = frames.reduce((sum, frame) => sum + frame.duration, 0);
+  const looping = phase === "idle" || phase === "action";
+  let cursor = looping
+    ? ((Math.max(0, elapsed) % total) + total) % total
+    : Math.min(Math.max(0, elapsed), Math.max(0, total - 1));
+  for (let index = 0; index < frames.length; index++) {
+    const current = frames[index];
+    if (cursor < current.duration) {
+      return {
+        current,
+        next: index + 1 < frames.length ? frames[index + 1] : (looping ? frames[0] : current),
+        progress: current.duration <= 1 ? 1 : cursor / current.duration,
+      };
+    }
+    cursor -= current.duration;
+  }
+  return { current: frames[frames.length - 1], next: frames[0], progress: 1 };
+}
+
+function colorizeSpriteLine(
+  line: string,
+  c: AnimColors,
+  frame: AnimationFrame,
+  transitionOpacity = 1,
+): string {
   const layers = frame.layers ?? SPRITE_LAYERS;
   return Array.from(line).map((glyph) => {
     if (/\s/.test(glyph)) return glyph;
@@ -824,6 +901,7 @@ function colorizeSpriteLine(line: string, c: AnimColors, frame: AnimationFrame):
       ?? layers.find((layer) => layer.name === "body")
       ?? { name: "body" as const, brightness: 0 };
     const amount = owner.brightness + c.pulseOffset;
+    if (transitionOpacity < 1 && c.fade) return c.fade(owner.name, glyph, amount, transitionOpacity);
     return c.layer ? c.layer(owner.name, glyph, amount) : c.shade(glyph, amount);
   }).join("");
 }
@@ -833,9 +911,18 @@ export function renderAdvancedAnimation(
   elapsed: number,
   phase: AnimationPhase,
   c: AnimColors,
+  opacity = 1,
 ): string[] {
-  const frame = selectAnimationFrame(animation, elapsed, phase);
-  return frame.lines.map((line) => colorizeSpriteLine(line, c, frame));
+  const transition = sampleAnimationFrameTransition(animation, elapsed, phase);
+  const hasNext = transition.current !== transition.next;
+  // Fade the outgoing silhouette down before switching at the midpoint, then
+  // brighten the incoming one. This hides terminal-cell jumps without creating
+  // malformed hybrid faces or symbols.
+  const frame = hasNext && transition.progress >= 0.5 ? transition.next : transition.current;
+  const linearOpacity = hasNext ? Math.abs(transition.progress - 0.5) * 2 : 1;
+  const frameOpacity = linearOpacity * linearOpacity * (3 - 2 * linearOpacity);
+  const transitionOpacity = Math.max(0, Math.min(1, frameOpacity * opacity));
+  return frame.lines.map((line) => colorizeSpriteLine(line, c, frame, transitionOpacity));
 }
 
 /**
@@ -972,6 +1059,13 @@ export interface AnimationRuntime {
   phaseStartedAt?: number;
   lastActive?: boolean;
   lastToolName?: string | null;
+  transitionFromPhase?: AnimationPhase;
+  transitionFromElapsed?: number;
+  transitionFromOpacity?: number;
+  transitionStartedAt?: number;
+  displayedPhase?: AnimationPhase;
+  displayedElapsed?: number;
+  displayedOpacity?: number;
 }
 
 interface EditorContext {
@@ -1072,6 +1166,13 @@ export function resolveAnimationForSession(
   runtime.phaseStartedAt = undefined;
   runtime.lastActive = undefined;
   runtime.lastToolName = undefined;
+  runtime.transitionFromPhase = undefined;
+  runtime.transitionFromElapsed = undefined;
+  runtime.transitionFromOpacity = undefined;
+  runtime.transitionStartedAt = undefined;
+  runtime.displayedPhase = undefined;
+  runtime.displayedElapsed = undefined;
+  runtime.displayedOpacity = undefined;
   return persistedRandom;
 }
 
@@ -1090,6 +1191,13 @@ export function applyInputSettingValue(
     runtime.phaseStartedAt = undefined;
     runtime.lastActive = undefined;
     runtime.lastToolName = undefined;
+    runtime.transitionFromPhase = undefined;
+    runtime.transitionFromElapsed = undefined;
+    runtime.transitionFromOpacity = undefined;
+    runtime.transitionStartedAt = undefined;
+    runtime.displayedPhase = undefined;
+    runtime.displayedElapsed = undefined;
+    runtime.displayedOpacity = undefined;
     config.animations.working = newValue;
     if (newValue === "random") config.animations.lastWorking = runtime.resolved;
     return true;
@@ -1164,31 +1272,47 @@ function ansiSafeLine(line: string, width: number, pad = true): string {
 function transitionAnimationPhase(runtime: AnimationRuntime, active: boolean, toolName: string | null, now: number): AnimationPhase | "idle" {
   if (runtime.phaseStartedAt === undefined || runtime.phase === undefined) {
     runtime.phase = active ? "enter" : "idle";
-    runtime.phaseStartedAt = now;
+    runtime.phaseStartedAt = active ? now + WORKING_ANIMATION_TICK_MS * 3 : now;
+    runtime.transitionFromPhase = undefined;
+    runtime.transitionFromElapsed = undefined;
+    runtime.transitionFromOpacity = undefined;
+    runtime.transitionStartedAt = active ? now : undefined;
+    runtime.displayedPhase = undefined;
+    runtime.displayedElapsed = undefined;
+    runtime.displayedOpacity = undefined;
     runtime.lastActive = active;
     runtime.lastToolName = toolName;
     return runtime.phase;
   }
   const previousActive = runtime.lastActive ?? false;
   const previousTool = runtime.lastToolName ?? null;
+  const moveTo = (next: AnimationPhase): void => {
+    if (runtime.phase === next) return;
+    const previousPhase = runtime.displayedPhase ?? runtime.phase;
+    const capturePrevious = previousActive || previousPhase !== "idle";
+    runtime.transitionFromPhase = capturePrevious ? previousPhase : undefined;
+    runtime.transitionFromElapsed = capturePrevious
+      ? (runtime.displayedElapsed ?? Math.max(0, now - (runtime.phaseStartedAt ?? now)))
+      : undefined;
+    runtime.transitionFromOpacity = capturePrevious ? (runtime.displayedOpacity ?? 1) : undefined;
+    runtime.transitionStartedAt = now;
+    runtime.phase = next;
+    // Hold the target at its first frame while the source fades away, then
+    // start its own clock after the crossfade so no keyframes are skipped.
+    runtime.phaseStartedAt = now + WORKING_ANIMATION_TICK_MS * 3;
+  };
   if (!active) {
-    if (previousActive && runtime.phase !== "exit") {
-      runtime.phase = "exit";
-      runtime.phaseStartedAt = now;
-    }
+    if (previousActive && runtime.phase !== "exit") moveTo("exit");
     runtime.lastActive = false;
     runtime.lastToolName = null;
     return runtime.phase;
   }
   if (!previousActive || runtime.phase === "exit") {
-    runtime.phase = "enter";
-    runtime.phaseStartedAt = now;
+    moveTo("enter");
   } else if (runtime.phase === "enter" && now - runtime.phaseStartedAt >= Math.max(1, animationPhaseDuration(runtime.resolved, "enter"))) {
-    runtime.phase = toolName ? "action" : "idle";
-    runtime.phaseStartedAt = now;
+    moveTo(toolName ? "action" : "idle");
   } else if (runtime.phase !== "enter" && Boolean(toolName) !== Boolean(previousTool)) {
-    runtime.phase = toolName ? "action" : "idle";
-    runtime.phaseStartedAt = now;
+    moveTo(toolName ? "action" : "idle");
   }
   runtime.lastActive = true;
   runtime.lastToolName = toolName;
@@ -1295,9 +1419,18 @@ export function renderAdvancedWorkingWidgetLines(
   const phase = transitionAnimationPhase(runtime, !idle, toolName, now);
   const phaseElapsed = Math.max(0, now - (runtime.phaseStartedAt ?? now));
   if (idle && phase === "idle") return [];
-  if (idle && phase === "exit" && phaseElapsed >= Math.max(1, animationPhaseDuration(runtime.resolved, "exit"))) {
+  const crossfadeMs = WORKING_ANIMATION_TICK_MS * 3;
+  const exitDuration = Math.max(1, animationPhaseDuration(runtime.resolved, "exit"));
+  if (idle && phase === "exit" && phaseElapsed >= exitDuration + crossfadeMs + WORKING_ANIMATION_TICK_MS) {
     runtime.phase = "idle";
     runtime.phaseStartedAt = now;
+    runtime.transitionFromPhase = undefined;
+    runtime.transitionFromElapsed = undefined;
+    runtime.transitionFromOpacity = undefined;
+    runtime.transitionStartedAt = undefined;
+    runtime.displayedPhase = undefined;
+    runtime.displayedElapsed = undefined;
+    runtime.displayedOpacity = undefined;
     return [];
   }
 
@@ -1313,16 +1446,48 @@ export function renderAdvancedWorkingWidgetLines(
     expression = THINKING_EXPRESSIONS[runtime.expressionIndex];
   }
   if (runtime.startedAt <= 0) runtime.startedAt = now;
-  const c: AnimColors = {
-    pulseOffset: Math.round(Math.sin(now / 120) * 50),
-    shade: (text, amount) => shadeFgAnsi(accentAnsi, amount, text),
-    layer: (name, text, amount = 0) => {
-      const bias = name === "status" ? -5 : amount;
-      return shadeFgAnsi(accentAnsi, bias, text);
-    },
-  };
+  const c = createAnimationColors(accentAnsi, Math.round(Math.sin(now / 120) * 50));
   const tier = animationTier(width);
-  const sprite = renderAdvancedAnimation(runtime.resolved, phaseElapsed, phase === "idle" ? "idle" : phase, c);
+  const targetPhase = phase as AnimationPhase;
+  const crossfadeAge = runtime.transitionStartedAt === undefined ? crossfadeMs : Math.max(0, now - runtime.transitionStartedAt);
+  const ease = (value: number) => {
+    const clamped = Math.max(0, Math.min(1, value));
+    return clamped * clamped * (3 - 2 * clamped);
+  };
+  const exitOpacity = idle && targetPhase === "exit" && phaseElapsed >= exitDuration
+    ? ease(1 - (phaseElapsed - exitDuration) / crossfadeMs)
+    : 1;
+  let displayedPhase: AnimationPhase = targetPhase;
+  let displayedElapsed = phaseElapsed;
+  let displayedOpacity = exitOpacity;
+  if (crossfadeAge < crossfadeMs && runtime.transitionFromPhase) {
+    const progress = crossfadeAge / crossfadeMs;
+    if (progress < 0.5) {
+      displayedPhase = runtime.transitionFromPhase;
+      displayedElapsed = runtime.transitionFromElapsed ?? 0;
+      displayedOpacity = (runtime.transitionFromOpacity ?? 1) * ease(1 - progress * 2);
+    } else {
+      displayedOpacity = exitOpacity * ease((progress - 0.5) * 2);
+    }
+  } else if (runtime.transitionStartedAt !== undefined && !runtime.transitionFromPhase && crossfadeAge < crossfadeMs) {
+    displayedOpacity = exitOpacity * ease(crossfadeAge / crossfadeMs);
+  }
+  const sprite = renderAdvancedAnimation(
+    runtime.resolved,
+    displayedElapsed,
+    displayedPhase,
+    c,
+    displayedOpacity,
+  );
+  runtime.displayedPhase = displayedPhase;
+  runtime.displayedElapsed = displayedElapsed;
+  runtime.displayedOpacity = displayedOpacity;
+  if (crossfadeAge >= crossfadeMs) {
+    runtime.transitionFromPhase = undefined;
+    runtime.transitionFromElapsed = undefined;
+    runtime.transitionFromOpacity = undefined;
+    runtime.transitionStartedAt = undefined;
+  }
   if (tier === "compact") {
     // Use the phase's most expressive sprite row so enter/action/exit remain
     // visibly distinct even when the full multi-line sprite cannot fit.
@@ -1463,6 +1628,14 @@ export function animationPreviewMoment(elapsed: number): { phase: AnimationPhase
   return { phase: "exit", elapsed: cycleElapsed - 2_800 };
 }
 
+export function animationPreviewEffectiveMoment(elapsed: number): { phase: AnimationPhase; elapsed: number } {
+  const moment = animationPreviewMoment(elapsed);
+  return {
+    phase: moment.phase,
+    elapsed: Math.max(0, moment.elapsed - ANIMATION_PREVIEW_TICK_MS * 3),
+  };
+}
+
 export function resolveAnimationPreviewOption(
   option: WorkingAnimationChoice,
   elapsed: number,
@@ -1516,25 +1689,55 @@ export class AnimationPreviewMenu {
     return resolveAnimationPreviewOption(option, elapsed);
   }
 
-  private preview(option: WorkingAnimationChoice, elapsed: number): string {
+  private previewSprite(option: WorkingAnimationChoice, elapsed: number): {
+    resolved: WorkingAnimation;
+    moment: { phase: AnimationPhase; elapsed: number };
+    lines: string[];
+  } | null {
     const resolved = this.previewResolved(option, elapsed);
-    if (!resolved) return this.theme.fg("dim", "(hidden)");
-    const moment = animationPreviewMoment(elapsed);
-    const lines = renderAdvancedAnimation(resolved, moment.elapsed, moment.phase, {
-      shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
-      pulseOffset: Math.round(Math.sin(elapsed / 120) * 50),
-    });
-    return lines[Math.floor(lines.length / 2)] ?? "";
+    if (!resolved) return null;
+    const moment = animationPreviewEffectiveMoment(elapsed);
+    const colors = createAnimationColors(
+      this.theme.getFgAnsi("accent"),
+      Math.round(Math.sin(elapsed / 120) * 50),
+    );
+    const cycleElapsed = ((elapsed % ANIMATION_PREVIEW_CYCLE_MS) + ANIMATION_PREVIEW_CYCLE_MS) % ANIMATION_PREVIEW_CYCLE_MS;
+    const phaseStart = moment.phase === "enter" ? 0 : moment.phase === "idle" ? 600 : moment.phase === "action" ? 1_800 : 2_800;
+    const boundaryAge = cycleElapsed - phaseStart;
+    const crossfadeMs = ANIMATION_PREVIEW_TICK_MS * 3;
+    const targetMoment = moment;
+    const hasPreviousPhase = moment.phase !== "enter" || elapsed >= ANIMATION_PREVIEW_CYCLE_MS;
+    let lines: string[];
+    if (boundaryAge < crossfadeMs && hasPreviousPhase) {
+      const progress = boundaryAge / crossfadeMs;
+      const ease = (value: number) => {
+        const clamped = Math.max(0, Math.min(1, value));
+        return clamped * clamped * (3 - 2 * clamped);
+      };
+      if (progress < 0.5) {
+        const previousElapsed = Math.max(0, elapsed - boundaryAge - 1);
+        const previousResolved = this.previewResolved(option, previousElapsed) ?? resolved;
+        const previousMoment = animationPreviewEffectiveMoment(previousElapsed);
+        lines = renderAdvancedAnimation(previousResolved, previousMoment.elapsed, previousMoment.phase, colors, ease(1 - progress * 2));
+      } else {
+        lines = renderAdvancedAnimation(resolved, targetMoment.elapsed, targetMoment.phase, colors, ease((progress - 0.5) * 2));
+      }
+    } else {
+      lines = renderAdvancedAnimation(resolved, targetMoment.elapsed, targetMoment.phase, colors, 1);
+    }
+    return { resolved, moment: targetMoment, lines };
+  }
+
+  private preview(option: WorkingAnimationChoice, elapsed: number): string {
+    const sprite = this.previewSprite(option, elapsed);
+    if (!sprite) return this.theme.fg("dim", "(hidden)");
+    return sprite.lines[Math.floor(sprite.lines.length / 2)] ?? "";
   }
 
   private expandedPreview(option: WorkingAnimationChoice, elapsed: number, width: number): string[] {
-    const resolved = this.previewResolved(option, elapsed);
-    if (!resolved) return [this.theme.fg("dim", "  preview hidden (off)")];
-    const moment = animationPreviewMoment(elapsed);
-    const lines = renderAdvancedAnimation(resolved, moment.elapsed, moment.phase, {
-      shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
-      pulseOffset: Math.round(Math.sin(elapsed / 120) * 50),
-    });
+    const sprite = this.previewSprite(option, elapsed);
+    if (!sprite) return [this.theme.fg("dim", "  preview hidden (off)")];
+    const { resolved, moment, lines } = sprite;
     const phaseLabel = moment.phase.toUpperCase();
     const label = option === "random"
       ? `  ${option} → ${resolved} · ${phaseLabel} · cycles each showcase`

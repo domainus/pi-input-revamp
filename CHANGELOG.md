@@ -13,8 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   twinkle, flutter, triad, streak, pixel, glow, shadow, flicker, segment, and goo), including
   grapheme-safe clipping, animated ANSI-16/custom-color fallback, and matching live sample
   text in the selected settings preview.
-- Smoother animation pacing with a 30 FPS working-widget cadence, 25 FPS settings preview,
-  and shorter keyframe holds capped near 124 ms to eliminate visible input-settings stutter.
+- Smoother animation pacing with 30 FPS working-widget/settings cadences, shorter keyframe
+  holds capped near 124 ms, independent silhouette opacity crossfades, phase-boundary source/target
+  transitions, non-wrapping finite phases, delayed target clocks, interruption-safe opacity,
+  final exit fade-out, startup-safe previews, and cached accent shaders to eliminate bright
+  keyframe jumps and repeated per-glyph ANSI parsing.
 - A typed advanced animation engine with variable frame durations, enter/idle/action/exit
   phases, theme-safe named color layers, and full/condensed/compact terminal tiers.
 - Live multi-line selected-row panels plus phase-aware advanced sprite art in every animation
