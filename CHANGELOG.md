@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Selectable working animations: `wave`, `orbit`, `scanner`, `bounce`,
   `sparkle`, `fairy`, `triforce`, `speedster`, `invader`, `aura`, `ninja`,
   `flame`, `mecha`, and `slime`.
-- `/input-settings` searchable TUI for changing the animation or independently
-  showing/hiding every configured footer element without losing layout order.
+- `/input-settings` searchable TUI with a live animated-preview submenu for the
+  animation picker, plus independent show/hide controls for every configured
+  footer element without losing layout order.
 - `random` and `off` working-animation modes.
 - The working animation now renders above active subagent/workflow status boxes.
 

@@ -31,7 +31,7 @@
 
 import { CustomEditor, getSettingsListTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
-import { Container, type SettingItem, SettingsList, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, type SettingItem, SettingsList, type SettingsListTheme, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
@@ -813,7 +813,11 @@ function configuredElementIds(config: InputRevampConfig): ElementId[] {
 
 export const INPUT_SETTINGS_VISIBLE_ROWS = 8;
 
-export function buildInputSettingItems(config: InputRevampConfig, runtime: AnimationRuntime): SettingItem[] {
+export function buildInputSettingItems(
+  config: InputRevampConfig,
+  runtime: AnimationRuntime,
+  animationSubmenu?: SettingItem["submenu"],
+): SettingItem[] {
   const visibilityItems: SettingItem[] = configuredElementIds(config).map((elementId) => ({
     id: `visibility:${elementId}`,
     label: elementLabel(elementId),
@@ -826,7 +830,7 @@ export function buildInputSettingItems(config: InputRevampConfig, runtime: Anima
     label: "Working animation",
     description: "Animation above active subagent/workflow boxes. Random changes each Pi session; off hides it.",
     currentValue: runtime.selected,
-    values: [...WORKING_ANIMATIONS, "random", "off"],
+    ...(animationSubmenu ? { submenu: animationSubmenu } : { values: [...WORKING_ANIMATIONS, "random", "off"] }),
   }, ...visibilityItems];
 }
 
@@ -942,6 +946,170 @@ class WorkingAnimationWidget {
 
   invalidate(): void {}
   dispose(): void { this.stop(); }
+}
+
+const ANIMATION_MENU_OPTIONS: readonly WorkingAnimationChoice[] = [...WORKING_ANIMATIONS, "random", "off"];
+const ANIMATION_MENU_VISIBLE_ROWS = 10;
+
+/** One-row-per-option animated picker used by the working-animation submenu. */
+export class AnimationPreviewMenu {
+  private selectedIndex: number;
+  private readonly startedAt = Date.now();
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private readonly tui: TUI;
+  private readonly theme: {
+    fg: (key: any, text: string) => string;
+    bold: (text: string) => string;
+    getFgAnsi: (key: any) => string;
+  };
+  private readonly keybindings: KeybindingsManager;
+  private readonly done: (selectedValue?: string) => void;
+
+  constructor(
+    tui: TUI,
+    theme: {
+      fg: (key: any, text: string) => string;
+      bold: (text: string) => string;
+      getFgAnsi: (key: any) => string;
+    },
+    keybindings: KeybindingsManager,
+    currentValue: string,
+    done: (selectedValue?: string) => void,
+  ) {
+    this.tui = tui;
+    this.theme = theme;
+    this.keybindings = keybindings;
+    this.done = done;
+    const currentIndex = ANIMATION_MENU_OPTIONS.indexOf(currentValue as WorkingAnimationChoice);
+    this.selectedIndex = currentIndex >= 0 ? currentIndex : 0;
+    this.timer = setInterval(() => {
+      try { this.tui.requestRender(); } catch { /* submenu may be detached */ }
+    }, 80);
+    this.timer.unref?.();
+  }
+
+  private preview(option: WorkingAnimationChoice, elapsed: number): string {
+    if (option === "off") return this.theme.fg("dim", "(hidden)");
+    const resolved = option === "random"
+      ? WORKING_ANIMATIONS[Math.floor(elapsed / 800) % WORKING_ANIMATIONS.length]
+      : option;
+    const pulseOffset = Math.round(Math.sin(elapsed / 120) * 50);
+    const frame = renderWorkingAnimation(resolved, elapsed, {
+      shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
+      pulseOffset,
+    });
+    return frame + " ".repeat(Math.max(0, 7 - visibleWidth(frame)));
+  }
+
+  render(width: number): string[] {
+    if (width <= 0) return [];
+    const elapsed = Date.now() - this.startedAt;
+    const start = Math.max(0, Math.min(
+      this.selectedIndex - Math.floor(ANIMATION_MENU_VISIBLE_ROWS / 2),
+      ANIMATION_MENU_OPTIONS.length - ANIMATION_MENU_VISIBLE_ROWS,
+    ));
+    const end = Math.min(start + ANIMATION_MENU_VISIBLE_ROWS, ANIMATION_MENU_OPTIONS.length);
+    const lines = [truncateToWidth(this.theme.fg("accent", this.theme.bold(" Animation previews")), width, "")];
+    for (let index = start; index < end; index++) {
+      const option = ANIMATION_MENU_OPTIONS[index];
+      const selected = index === this.selectedIndex;
+      const prefix = selected ? this.theme.fg("accent", "› ") : "  ";
+      const name = option.padEnd(12, " ");
+      const styledName = selected ? this.theme.fg("accent", name) : this.theme.fg("text", name);
+      lines.push(truncateToWidth(`${prefix}${styledName} ${this.preview(option, elapsed)}`, width, ""));
+    }
+    if (start > 0 || end < ANIMATION_MENU_OPTIONS.length) {
+      lines.push(truncateToWidth(this.theme.fg("dim", `  (${this.selectedIndex + 1}/${ANIMATION_MENU_OPTIONS.length})`), width, ""));
+    }
+    lines.push(truncateToWidth(this.theme.fg("dim", " ↑↓ preview · Enter choose · Esc back"), width, ""));
+    return lines;
+  }
+
+  handleInput(data: string): void {
+    if (this.keybindings.matches(data, "tui.select.up")) {
+      this.selectedIndex = this.selectedIndex === 0 ? ANIMATION_MENU_OPTIONS.length - 1 : this.selectedIndex - 1;
+    } else if (this.keybindings.matches(data, "tui.select.down")) {
+      this.selectedIndex = this.selectedIndex === ANIMATION_MENU_OPTIONS.length - 1 ? 0 : this.selectedIndex + 1;
+    } else if (this.keybindings.matches(data, "tui.select.confirm") || data === " ") {
+      const selected = ANIMATION_MENU_OPTIONS[this.selectedIndex];
+      this.dispose();
+      this.done(selected);
+      return;
+    } else if (this.keybindings.matches(data, "tui.select.cancel")) {
+      this.dispose();
+      this.done();
+      return;
+    }
+    this.tui.requestRender();
+  }
+
+  invalidate(): void {}
+  dispose(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+}
+
+export function createInputSettingsComponent(
+  tui: TUI,
+  theme: {
+    fg: (key: any, text: string) => string;
+    bold: (text: string) => string;
+    getFgAnsi: (key: any) => string;
+  },
+  keybindings: KeybindingsManager,
+  config: InputRevampConfig,
+  runtime: AnimationRuntime,
+  onPersist: () => void,
+  onClose: () => void,
+  settingsTheme?: SettingsListTheme,
+) {
+  const container = new Container();
+  container.addChild(new Text(theme.fg("accent", theme.bold("Input & Footer Settings")), 1, 1));
+  let activePreview: AnimationPreviewMenu | undefined;
+  const items = buildInputSettingItems(
+    config,
+    runtime,
+    (currentValue, closeSubmenu) => {
+      const preview = new AnimationPreviewMenu(
+        tui,
+        theme,
+        keybindings,
+        currentValue,
+        (selectedValue) => {
+          activePreview = undefined;
+          closeSubmenu(selectedValue);
+        },
+      );
+      activePreview = preview;
+      return preview;
+    },
+  );
+  const settingsList = new SettingsList(
+    items,
+    INPUT_SETTINGS_VISIBLE_ROWS,
+    settingsTheme ?? getSettingsListTheme(),
+    (id, newValue) => {
+      if (!applyInputSettingValue(config, runtime, id, newValue)) return;
+      onPersist();
+    },
+    onClose,
+    { enableSearch: true },
+  );
+  container.addChild(settingsList);
+
+  return {
+    render(width: number) { return container.render(width); },
+    invalidate() { container.invalidate(); },
+    handleInput(data: string) {
+      settingsList.handleInput?.(data);
+      tui.requestRender();
+    },
+    dispose() {
+      activePreview?.dispose();
+      activePreview = undefined;
+    },
+  };
 }
 
 /** Read-only context passed to every element renderer. */
@@ -1680,33 +1848,17 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
-      await ctx.ui.custom((_tui, theme, _keybindings, done) => {
-        const container = new Container();
-        container.addChild(new Text(theme.fg("accent", theme.bold("Input & Footer Settings")), 1, 1));
-
-        const items = buildInputSettingItems(config, animationRuntime);
-        const settingsList = new SettingsList(
-          items,
-          INPUT_SETTINGS_VISIBLE_ROWS,
-          getSettingsListTheme(),
-          (id, newValue) => {
-            if (!applyInputSettingValue(config, animationRuntime, id, newValue)) return;
-            if (!saveConfig(config)) ctx.ui.notify("Could not save input/footer settings", "error");
-          },
-          () => done(undefined),
-          { enableSearch: true },
-        );
-        container.addChild(settingsList);
-
-        return {
-          render(width: number) { return container.render(width); },
-          invalidate() { container.invalidate(); },
-          handleInput(data: string) {
-            settingsList.handleInput?.(data);
-            _tui.requestRender();
-          },
-        };
-      });
+      await ctx.ui.custom((tui, theme, keybindings, done) => createInputSettingsComponent(
+        tui,
+        theme,
+        keybindings,
+        config,
+        animationRuntime,
+        () => {
+          if (!saveConfig(config)) ctx.ui.notify("Could not save input/footer settings", "error");
+        },
+        () => done(undefined),
+      ));
     },
   });
 

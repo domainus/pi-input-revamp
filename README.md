@@ -139,8 +139,9 @@ Each effect can be toggled independently under `animations`:
 | `working`     | Working indicator: `wave`, `orbit`, `scanner`, `bounce`, `sparkle`, `fairy`, `triforce`, `speedster`, `invader`, `aura`, `ninja`, `flame`, `mecha`, `slime`, `random`, or `off` |
 
 Run `/input-settings` to change the working animation and footer visibility
-interactively. Choices are saved to `~/.pi/pi-input-revamp.json` and apply
-immediately. `random` chooses a fresh session-local animation once when each Pi
+interactively. Press Enter on **Working animation** to open a scrollable submenu
+where every option animates live before you choose it. Choices are saved to
+`~/.pi/pi-input-revamp.json` and apply immediately. `random` chooses a fresh session-local animation once when each Pi
 session starts and remembers the last resolved choice so consecutive sessions do
 not repeat it. `off` hides the working animation entirely.
 

@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import installInputRevamp, {
+  AnimationPreviewMenu,
   INPUT_SETTINGS_VISIBLE_ROWS,
   WORKING_ANIMATIONS,
   applyInputSettingValue,
   buildInputSettingItems,
+  createInputSettingsComponent,
   dynamicWorkflowMatches,
   dynamicWorkflowRanges,
   isElementVisible,
@@ -88,9 +90,12 @@ test("settings expose bounded searchable-row data and callbacks preserve hidden 
   const runtime: AnimationRuntime = {
     selected: "wave", resolved: "wave", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0,
   };
-  const items = buildInputSettingItems(config, runtime);
+  const submenu = (() => ({ render: () => [], invalidate() {} })) as any;
+  const items = buildInputSettingItems(config, runtime, submenu);
   assert.equal(INPUT_SETTINGS_VISIBLE_ROWS, 8);
-  assert.ok(items.some((item) => item.id === "working-animation"));
+  const animationItem = items.find((item) => item.id === "working-animation");
+  assert.equal(animationItem?.submenu, submenu);
+  assert.equal(animationItem?.values, undefined);
   assert.ok(items.some((item) => item.id === "visibility:model"));
   assert.ok(items.some((item) => item.id === "visibility:ext:codex-usage"));
   const before = [...config.layout.bottomLeft];
@@ -100,6 +105,92 @@ test("settings expose bounded searchable-row data and callbacks preserve hidden 
   assert.equal(applyInputSettingValue(config, runtime, "working-animation", "off"), true);
   assert.equal(runtime.selected, "off");
   assert.equal(applyInputSettingValue(config, runtime, "bad-id", "on"), false);
+});
+
+test("animation submenu renders live previews and returns the selected option", async () => {
+  let selected: string | undefined;
+  let requestedRenders = 0;
+  const keybindings = {
+    matches(data: string, action: string) {
+      return (action === "tui.select.up" && data === "up")
+        || (action === "tui.select.down" && data === "down")
+        || (action === "tui.select.confirm" && data === "enter")
+        || (action === "tui.select.cancel" && data === "escape");
+    },
+  } as any;
+  const menu = new AnimationPreviewMenu(
+    { requestRender() { requestedRenders += 1; } } as any,
+    {
+      fg: (_key: string, text: string) => text,
+      bold: (text: string) => text,
+      getFgAnsi: () => accent,
+    },
+    keybindings,
+    "fairy",
+    (value) => { selected = value; },
+  );
+  const first = menu.render(32);
+  assert.ok(first.some((line) => line.includes("fairy")));
+  assert.ok(first.every((line) => visibleWidth(line) <= 32));
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.ok(requestedRenders > 0);
+  assert.notDeepEqual(menu.render(32), first, "submenu previews did not animate");
+  menu.handleInput("down");
+  menu.handleInput("enter");
+  assert.equal(selected, "triforce");
+  const stoppedAt = requestedRenders;
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(requestedRenders, stoppedAt, "submenu timer survived selection cleanup");
+});
+
+test("preview timers stop on cancel and external settings teardown", async () => {
+  let requestedRenders = 0;
+  const tui = { requestRender() { requestedRenders += 1; } } as any;
+  const theme = {
+    fg: (_key: string, text: string) => text,
+    bold: (text: string) => text,
+    getFgAnsi: () => accent,
+  };
+  const keybindings = {
+    matches(data: string, action: string) {
+      return (action === "tui.select.confirm" && data === "enter")
+        || (action === "tui.select.cancel" && data === "escape");
+    },
+  } as any;
+
+  const cancelled = new AnimationPreviewMenu(tui, theme, keybindings, "random", () => {});
+  cancelled.handleInput("escape");
+  const afterCancel = requestedRenders;
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(requestedRenders, afterCancel, "cancelled preview timer survived");
+
+  const config = mergeInputRevampConfig(undefined);
+  const runtime: AnimationRuntime = {
+    selected: "wave", resolved: "wave", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0,
+  };
+  const root = createInputSettingsComponent(
+    tui,
+    theme,
+    keybindings,
+    config,
+    runtime,
+    () => {},
+    () => {},
+    {
+      label: (text) => text,
+      value: (text) => text,
+      description: (text) => text,
+      cursor: "> ",
+      hint: (text) => text,
+    },
+  );
+  root.handleInput("enter");
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.ok(requestedRenders > afterCancel, "settings submenu timer never started");
+  root.dispose();
+  const afterDispose = requestedRenders;
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(requestedRenders, afterDispose, "preview timer survived external settings disposal/reload");
 });
 
 test("random animation never immediately repeats the previous animation", () => {
