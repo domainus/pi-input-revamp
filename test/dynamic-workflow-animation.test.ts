@@ -19,11 +19,19 @@ import installInputRevamp, {
   rainbowWorkflowSlice,
   renderWorkingAnimation,
   renderWorkingWidgetLines,
+  renderAdvancedAnimation,
+  renderAdvancedWorkingWidgetLines,
+  resolveAnimationForSession,
+  animationTier,
+  getAnimationDefinition,
+  selectAnimationFrame,
+  animationPhaseDuration,
   visibleElementIds,
   type AnimationRuntime,
 } from "../extensions/index.ts";
 
 const accent = "\x1b[38;2;77;163;255m";
+const stripAnsi = (text: string) => text.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
 
 test("matches singular and plural dynamic workflow phrases consistently", () => {
   for (const value of [
@@ -80,6 +88,104 @@ test("slime animation keeps a cute round face while wobbling and squashing", () 
   assert.ok(frames.every((frame) => visibleWidth(frame) === 11));
 });
 
+test("advanced definitions select variable-duration phase frames and preserve slime semantics", () => {
+  const definition = getAnimationDefinition("slime");
+  assert.ok(definition.frames.some((frame) => frame.phase === "enter"));
+  assert.ok(definition.frames.some((frame) => frame.phase === "action"));
+  assert.ok(definition.frames.some((frame) => frame.phase === "exit"));
+  assert.ok(new Set(definition.frames.map((frame) => frame.duration)).size > 1);
+  assert.equal(animationPhaseDuration("slime", "enter"), 210);
+  assert.ok(definition.frames.some((frame) => frame.semantic === "slime-wobble"));
+  assert.equal(selectAnimationFrame("slime", 0, "idle").semantic, "slime-round");
+  assert.equal(selectAnimationFrame("slime", 155, "idle").semantic, "slime-wobble");
+  assert.equal(selectAnimationFrame("slime", 0, "action").semantic, "slime-bounce");
+});
+
+test("all dedicated advanced sprites remain bounded in every lifecycle phase", () => {
+  const dedicated = ["slime", "fairy", "aura", "mecha", "flame", "invader", "triforce"] as const;
+  const phases = ["enter", "idle", "action", "exit"] as const;
+  for (const animation of dedicated) {
+    for (const phase of phases) {
+      if (animationPhaseDuration(animation, phase) === 0) continue;
+      for (const elapsed of [0, 90, 180, 360]) {
+        const lines = renderAdvancedAnimation(animation, elapsed, phase, {
+          shade: (text, amount) => `\x1b[38;2;${Math.max(0, Math.min(255, 100 + amount))};180;255m${text}\x1b[39m`,
+          pulseOffset: 0,
+        });
+        assert.ok(lines.length >= 1 && lines.length <= 3, `${animation}/${phase} line count`);
+        assert.ok(lines.every((line) => !line.includes("\n") && visibleWidth(line) <= 15), `${animation}/${phase} width`);
+      }
+    }
+  }
+});
+
+test("every animation implements every lifecycle phase and named layers are data-driven", () => {
+  const phases = ["enter", "idle", "action", "exit"] as const;
+  for (const animation of WORKING_ANIMATIONS) {
+    for (const phase of phases) {
+      assert.ok(animationPhaseDuration(animation, phase) > 0, `${animation} missing ${phase}`);
+      assert.ok(renderAdvancedAnimation(animation, 0, phase, { shade: (text) => text, pulseOffset: 0 }).length > 0);
+    }
+  }
+  const seen = new Set<string>();
+  for (const phase of phases) {
+    for (const elapsed of [0, 100, 220]) {
+      renderAdvancedAnimation("slime", elapsed, phase, {
+        shade: (text) => text,
+        pulseOffset: 0,
+        layer: (name, text) => { seen.add(name); return text; },
+      });
+    }
+  }
+  for (const layer of ["shadow", "body", "highlight", "face", "spark"]) {
+    assert.ok(seen.has(layer), `slime never rendered named layer ${layer}`);
+  }
+});
+
+test("advanced renderer adapts tiers, closes ANSI, and transitions enter/action/exit", () => {
+  assert.equal(animationTier(8), "compact");
+  assert.equal(animationTier(20), "condensed");
+  assert.equal(animationTier(40), "full");
+  const accentAnsi = "\x1b[38;2;77;163;255m";
+  for (const width of [8, 20, 40]) {
+    const runtime: AnimationRuntime = { selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0 };
+    const lines = renderAdvancedWorkingWidgetLines(runtime, false, null, width, accentAnsi, 1_000);
+    assert.equal(lines.length, width < 16 ? 1 : width < 28 ? 3 : 4);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    assert.ok(lines.every((line) => line.includes("\x1b[0m")));
+  }
+  const runtime: AnimationRuntime = { selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0 };
+  renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_000);
+  assert.equal(runtime.phase, "enter");
+  const firstIdle = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_210);
+  assert.equal(runtime.phase, "idle");
+  assert.match(stripAnsi(firstIdle.join("\n")), /╭───╮/, "idle phase did not start from slime-round");
+  renderAdvancedWorkingWidgetLines(runtime, false, "bash", 40, accentAnsi, 1_300);
+  assert.equal(runtime.phase, "action");
+  const exiting = renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_350);
+  assert.ok(exiting.length > 0);
+  assert.equal(runtime.phase, "exit");
+  assert.deepEqual(renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_550), []);
+  assert.equal(runtime.phase, "idle");
+
+  const compactRuntime: AnimationRuntime = { selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0 };
+  const compactEnter = stripAnsi(renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_000)[0]);
+  renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_210);
+  renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_220);
+  const compactAction = stripAnsi(renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_320)[0]);
+  assert.match(compactEnter, /╭───╮/, "compact enter lost its phase-specific dome");
+  assert.match(compactAction, />ᴗ</, "compact action did not use its phase-specific face");
+  assert.notEqual(compactEnter, compactAction);
+
+  for (const animation of WORKING_ANIMATIONS) {
+    for (const width of [1, 15, 16, 27, 28, 40]) {
+      const candidate: AnimationRuntime = { selected: animation, resolved: animation, startedAt: 0, expressionIndex: -1, expressionChangedAt: 0 };
+      const lines = renderAdvancedWorkingWidgetLines(candidate, false, "bash", width, accentAnsi, 2_000);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width), `${animation} overflowed width ${width}`);
+    }
+  }
+});
+
 test("config merging preserves layout while visibility and animation-off remain backward compatible", () => {
   const config = mergeInputRevampConfig({
     layout: { bottomLeft: ["ext:codex-usage"] },
@@ -116,6 +222,12 @@ test("settings expose bounded searchable-row data and callbacks preserve hidden 
   assert.deepEqual(config.layout.bottomLeft, before);
   assert.equal(applyInputSettingValue(config, runtime, "working-animation", "off"), true);
   assert.equal(runtime.selected, "off");
+  runtime.phase = "exit";
+  runtime.lastActive = true;
+  assert.equal(applyInputSettingValue(config, runtime, "working-animation", "slime"), true);
+  assert.equal(runtime.selected, "slime");
+  assert.equal(runtime.phase, undefined);
+  assert.equal(runtime.lastActive, undefined);
   assert.equal(applyInputSettingValue(config, runtime, "bad-id", "on"), false);
 });
 
@@ -143,6 +255,8 @@ test("animation submenu renders live previews and returns the selected option", 
   );
   const first = menu.render(32);
   assert.ok(first.some((line) => line.includes("fairy")));
+  assert.ok(first.some((line) => line.includes("live expanded preview")));
+  assert.ok(first.length >= 14, "selected row did not receive a multi-line preview panel");
   const slimeMenu = new AnimationPreviewMenu(
     { requestRender() {} } as any,
     {
@@ -217,6 +331,41 @@ test("preview timers stop on cancel and external settings teardown", async () =>
   const afterDispose = requestedRenders;
   await new Promise((resolve) => setTimeout(resolve, 90));
   assert.equal(requestedRenders, afterDispose, "preview timer survived external settings disposal/reload");
+});
+
+test("first random session can select wave when no previous choice exists", () => {
+  const config = mergeInputRevampConfig({ animations: { working: "random" } });
+  const runtime: AnimationRuntime = {
+    selected: "random", resolved: "wave", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0,
+  };
+  const oldRandom = Math.random;
+  try {
+    Math.random = () => 0;
+    assert.equal(resolveAnimationForSession(config, runtime, "startup"), true);
+    assert.equal(runtime.resolved, "wave");
+  } finally {
+    Math.random = oldRandom;
+  }
+});
+
+test("random animation persists across reload but rerolls for a new session", () => {
+  const config = mergeInputRevampConfig({ animations: { working: "random", lastWorking: "fairy" } });
+  const runtime: AnimationRuntime = {
+    selected: "random", resolved: "fairy", startedAt: 99, expressionIndex: 4, expressionChangedAt: 10,
+    phase: "action", phaseStartedAt: 20, lastActive: true, lastToolName: "bash",
+  };
+  assert.equal(resolveAnimationForSession(config, runtime, "reload"), false);
+  assert.equal(runtime.resolved, "fairy");
+  assert.equal(runtime.phase, undefined);
+  const oldRandom = Math.random;
+  try {
+    Math.random = () => 0;
+    assert.equal(resolveAnimationForSession(config, runtime, "new"), true);
+    assert.notEqual(runtime.resolved, "fairy");
+    assert.equal(config.animations.lastWorking, runtime.resolved);
+  } finally {
+    Math.random = oldRandom;
+  }
 });
 
 test("random animation never immediately repeats the previous animation", () => {
@@ -296,10 +445,22 @@ test("session start registers the animation as an early above-editor widget", as
       { getFgAnsi() { return accent; } },
     );
     assert.ok(component);
-    component.render(40);
+    handlers.get("tool_execution_start")?.[0]?.({ toolCallId: "a", toolName: "bash" }, ctx);
+    handlers.get("tool_execution_start")?.[0]?.({ toolCallId: "b", toolName: "read" }, ctx);
+    handlers.get("tool_execution_end")?.[0]?.({ toolCallId: "b", toolName: "read" }, ctx);
+    const parallelToolLines = component.render(40);
+    assert.match(parallelToolLines.at(-1) ?? "", /bash:/, "ending one parallel tool cleared the remaining action state");
     await new Promise((resolve) => setTimeout(resolve, 70));
     assert.ok(requestedRenders > 0, "widget timer never requested a render");
+    idle = true;
+    component.render(40); // starts the short exit lifecycle
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    component.render(40); // completes exit and must stop the timer
+    const idleStoppedAt = requestedRenders;
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.equal(requestedRenders, idleStoppedAt, "widget kept a timer while fully idle");
     component.dispose();
+    handlers.get("tool_execution_end")?.[0]?.({ toolCallId: "a", toolName: "bash" }, ctx);
     const stoppedAt = requestedRenders;
     await new Promise((resolve) => setTimeout(resolve, 70));
     assert.equal(requestedRenders, stoppedAt, "widget timer survived disposal/reload cleanup");

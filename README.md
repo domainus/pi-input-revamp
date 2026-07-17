@@ -150,6 +150,27 @@ editor row. Pi orders these widgets by registration time: to keep the animation
 above active legacy-subagent and dynamic-workflow boxes, list this package before
 `pi-interactive-subagents` in `settings.json` (the portable config does this).
 
+### Advanced sprite engine
+
+Working animations now use a typed, reusable frame model with variable frame durations and
+`enter`, `idle`, `action`, and `exit` phases. The renderer selects a theme-safe named layer
+(shadow, body, highlight, face, spark, or status) and adapts to the terminal: wide displays
+get a full multi-line sprite and expression, medium displays get a condensed sprite, and
+narrow displays retain the meaningful centered one-line renderer. ANSI output is clipped and
+closed at the requested width.
+
+While pi is reasoning the sprite runs its idle loop; tool execution switches to the action
+loop, and becoming idle plays a short melt/fade exit before the widget is removed. Timers are
+unref'd and disposed on widget removal or settings teardown, so a fully idle session has no
+animation timer. **slime** is the showcase treatment: a blue-isekai-inspired round body with
+face, highlights, wobble, squash/stretch, action bounce, and melt/pop exit frames. Fairy,
+aura, mecha, flame, invader, and triforce also have dedicated multi-line treatments; the
+remaining effects use a validated generic wrapper.
+
+The Working animation submenu keeps compact previews in every row and adds a live expanded
+panel for the selected row. `random` cycles examples only while previewing (it resolves once
+per actual pi session), and `off` explicitly previews the hidden state.
+
 ## How it works
 
 The extension registers a custom editor on `session_start` (and hides the

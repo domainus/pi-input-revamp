@@ -297,8 +297,9 @@ const THINKING_EXPRESSIONS = [
   "definitely not overthinking...",
 ];
 
-/** Last tool currently executing (read by the editor). */
+/** Tools currently executing; the newest name drives the action animation. */
 let activeToolName: string | null = null;
+const activeToolNames = new Map<string, string>();
 
 /**
  * Read-only view of the footer data, captured from the (otherwise hidden) footer
@@ -632,11 +633,185 @@ export function rainbowWorkflowSlice(
   return output + text.slice(localOffset);
 }
 
-interface AnimColors {
+export interface AnimationColors {
   /** accent lightened (amount>0) or darkened (amount<0) by `amount` per RGB channel */
   shade: (s: string, amount: number) => string;
   /** brightness offset of the global pulse (oscillates with the sine, ~ -50..+50) */
   pulseOffset: number;
+  /** Optional named layer renderer used by the advanced sprite engine. */
+  layer?: (name: AnimationColorLayer, s: string, amount?: number) => string;
+}
+
+type AnimColors = AnimationColors;
+
+/** Lifecycle phases shared by every advanced working-animation definition. */
+export type AnimationPhase = "enter" | "idle" | "action" | "exit";
+export type AnimationColorLayer = "shadow" | "body" | "highlight" | "face" | "spark" | "status";
+
+export interface AnimationLayer {
+  readonly name: AnimationColorLayer;
+  /** Relative brightness, applied without changing the active theme palette. */
+  readonly brightness: number;
+  /** Glyphs owned by this layer; adding sprite art never requires renderer edits. */
+  readonly glyphs?: string;
+}
+
+/** A frame is deliberately data-first so new sprites can be added without code. */
+export interface AnimationFrame {
+  readonly phase: AnimationPhase;
+  readonly duration: number;
+  readonly lines: readonly string[];
+  readonly layers?: readonly AnimationLayer[];
+  readonly semantic?: string;
+}
+
+export interface AnimationDefinition {
+  readonly id: WorkingAnimation;
+  readonly frames: readonly AnimationFrame[];
+  readonly compact: readonly string[];
+}
+
+export type AnimationTier = "full" | "condensed" | "compact";
+
+function spriteFrame(
+  phase: AnimationPhase,
+  duration: number,
+  lines: readonly string[],
+  semantic: string,
+  layers: readonly AnimationLayer[] = [
+    { name: "shadow", brightness: -35, glyphs: "_~" },
+    { name: "body", brightness: 20, glyphs: "─═│█▟▙▜▛▀▄[](){}" },
+    { name: "highlight", brightness: 75, glyphs: "╭╮╰╯‹›«»ʚɞ╾╼" },
+    { name: "face", brightness: 100, glyphs: "•ᴗ●◉◆><" },
+    { name: "spark", brightness: 120, glyphs: "·✧✦*⋆♨▲" },
+  ],
+): AnimationFrame {
+  return { phase, duration: Math.max(1, duration), lines, semantic, layers };
+}
+
+const SPRITE_LAYERS = [
+  { name: "shadow", brightness: -35, glyphs: "_~" },
+  { name: "body", brightness: 20, glyphs: "─═│█▟▙▜▛▀▄[](){}" },
+  { name: "highlight", brightness: 75, glyphs: "╭╮╰╯‹›«»ʚɞ╾╼" },
+  { name: "face", brightness: 100, glyphs: "•ᴗ●◉◆><" },
+  { name: "spark", brightness: 120, glyphs: "·✧✦*⋆♨▲" },
+] as const satisfies readonly AnimationLayer[];
+
+const ADVANCED_SPRITES: Partial<Record<WorkingAnimation, readonly AnimationFrame[]>> = {
+  slime: [
+    spriteFrame("enter", 90, ["    ·    ", "  ╭───╮  ", "  ╰ •ᴗ•╯  "], "slime-enter", SPRITE_LAYERS),
+    spriteFrame("enter", 120, ["   ·✧·   ", " ╭─────╮ ", " ╰ •ᴗ• ╯ "], "slime-rise", SPRITE_LAYERS),
+    spriteFrame("idle", 155, ["  ╭───╮  ", " ╭┤•ᴗ•├╮ ", " ╰─╮_╭─╯ "], "slime-round", SPRITE_LAYERS),
+    spriteFrame("idle", 190, [" ╭─────╮ ", "╭┤• ᴗ •├╮", "╰─╮___╭─╯"], "slime-wobble", SPRITE_LAYERS),
+    spriteFrame("action", 95, ["   ╭─╮   ", " ╭─┤•ᴗ•├─╮ ", "╰──╯_╰──╯"], "slime-bounce", SPRITE_LAYERS),
+    spriteFrame("action", 120, ["  ╭───╮  ", " ╭┤>ᴗ<├╮ ", "╰─╮___╭─╯"], "slime-action-face", SPRITE_LAYERS),
+    spriteFrame("exit", 90, [" ╭─────╮ ", "╰┤•ᴗ•├╯ ", "  ╰~~~╯  "], "slime-melt", SPRITE_LAYERS),
+    spriteFrame("exit", 110, ["   ╭─╮   ", "   •ᴗ•   ", "  ~~~~~  "], "slime-pop", SPRITE_LAYERS),
+  ],
+  fairy: [
+    spriteFrame("enter", 120, ["   ·✧·   ", "  ʚ●ɞ  ", "   · ·   "], "fairy-arrive"),
+    spriteFrame("idle", 140, [" · ʚ●ɞ · ", "  ‹✦›  ", " ·  ·  · "], "fairy-flutter"),
+    spriteFrame("idle", 170, ["  ✧ʚ◉ɞ✧  ", " · ‹› · ", "   · ·   "], "fairy-glow"),
+    spriteFrame("action", 95, ["✧ ʚ●ɞ  ✧", "  ‹◆›  ", " ·  ·  · "], "fairy-spark"),
+    spriteFrame("exit", 130, ["   ·✧·   ", "   ʚ●ɞ   ", "    ·    "], "fairy-fade"),
+  ],
+  aura: [
+    spriteFrame("enter", 110, ["    ·    ", "   ‹●›   ", "    ·    "], "aura-rise"),
+    spriteFrame("idle", 120, ["   ‹●›   ", "  «(◉)»  ", "   ‹●›   "], "aura-breathe"),
+    spriteFrame("idle", 160, ["  «{◆}»  ", " ‹{◉}› ", "  «{◆}»  "], "aura-expand"),
+    spriteFrame("action", 90, [" «‹◆›» ", "‹{◉}›", " «‹◆›» "], "aura-pulse"),
+    spriteFrame("exit", 140, ["   ‹●›   ", "    ·    ", "         "], "aura-fade"),
+  ],
+  mecha: [
+    spriteFrame("enter", 100, ["    [ ]    ", "  ╾[●]╼  ", "    ╰─╯    "], "mecha-boot"),
+    spriteFrame("idle", 135, ["  ╾[·─·]╼  ", " ╾[●─●]╼ ", "   ╰═╯   "], "mecha-idle"),
+    spriteFrame("idle", 175, [" ╾═[◉─◉]═╼ ", "  ╾[◆]╼  ", "   ╰═╯   "], "mecha-scan"),
+    spriteFrame("action", 85, ["╾═[◆─◆]═╼", " ╾[◉]╼ ", "  ╰═╯  "], "mecha-action"),
+    spriteFrame("exit", 120, ["  ╾[·]╼  ", "    [ ]    ", "     ·     "], "mecha-powerdown"),
+  ],
+  flame: [
+    spriteFrame("enter", 100, ["    ·    ", "   ‹♨›   ", "    ●    "], "flame-light"),
+    spriteFrame("idle", 125, ["   ·♨·   ", "  ‹♨●♨›  ", "   ‹◆›   "], "flame-flicker"),
+    spriteFrame("idle", 155, ["  ‹♨♨›  ", " ‹♨(◉)♨› ", "  ‹◆◆›  "], "flame-tall"),
+    spriteFrame("action", 80, [" ‹♨◆♨› ", "‹♨(◉)♨›", " ‹♨◆♨› "], "flame-burst"),
+    spriteFrame("exit", 120, ["   ‹♨›   ", "    ·    ", "         "], "flame-snuff"),
+  ],
+  invader: [
+    spriteFrame("enter", 120, ["    ▟█▙    ", "     ▀     ", "           "], "invader-drop"),
+    spriteFrame("idle", 150, ["   ▟███▙   ", "  ▟█▄█▄█▙  ", "   ▀█▀█▀   "], "invader-hover"),
+    spriteFrame("idle", 180, ["  ▟███▙  ", " ▟█▀█▀█▙ ", "▗█▛ ▀ ▜█▖"], "invader-wobble"),
+    spriteFrame("action", 90, [" ▟███▙ ", "▟█◆█◆█▙", " ▀█▀█▀ "], "invader-beam"),
+    spriteFrame("exit", 120, ["   ▟█▙   ", "    ▀    ", "    ·    "], "invader-flyaway"),
+  ],
+  triforce: [
+    spriteFrame("enter", 110, ["     ▲     ", "           ", "           "], "triforce-rise"),
+    spriteFrame("idle", 145, ["     ▲     ", "    ▲ ▲    ", "   ▲   ▲   "], "triforce-build"),
+    spriteFrame("idle", 180, ["    ▲ ▲    ", "   ▲   ▲   ", "  ▲ ▲ ▲ ▲  "], "triforce-glow"),
+    spriteFrame("action", 100, ["   ▲◆▲   ", "  ▲◆◆◆▲  ", " ▲◆◆◆◆◆▲ "], "triforce-cast"),
+    spriteFrame("exit", 130, ["    ▲ ▲    ", "     ▲     ", "           "], "triforce-fade"),
+  ],
+};
+
+function animationFrames(animation: WorkingAnimation): readonly AnimationFrame[] {
+  const dedicated = ADVANCED_SPRITES[animation];
+  if (dedicated) return dedicated;
+  const plain = (elapsed: number) => renderWorkingAnimation(animation, elapsed, { shade: (s) => s, pulseOffset: 0 });
+  return [
+    spriteFrame("enter", 90, [`· ${plain(0)}`], `${animation}-enter`),
+    spriteFrame("idle", 120, [plain(0)], `${animation}-idle-1`),
+    spriteFrame("idle", 120, [plain(120)], `${animation}-idle-2`),
+    spriteFrame("action", 90, [`‹${plain(180)}›`], `${animation}-action`),
+    spriteFrame("exit", 100, [`${plain(240)} ·`], `${animation}-exit`),
+  ];
+}
+
+export function getAnimationDefinition(animation: WorkingAnimation): AnimationDefinition {
+  return { id: animation, frames: animationFrames(animation), compact: [renderWorkingAnimation(animation, 0, { shade: (s) => s, pulseOffset: 0 })] };
+}
+
+export function animationPhaseDuration(animation: WorkingAnimation, phase: AnimationPhase): number {
+  return animationFrames(animation)
+    .filter((frame) => frame.phase === phase)
+    .reduce((total, frame) => total + frame.duration, 0);
+}
+
+export function selectAnimationFrame(
+  animation: WorkingAnimation,
+  elapsed: number,
+  phase: AnimationPhase = "idle",
+): AnimationFrame {
+  const frames = animationFrames(animation).filter((frame) => frame.phase === phase);
+  const available = frames.length > 0 ? frames : animationFrames(animation).filter((frame) => frame.phase === "idle");
+  if (available.length === 0) return animationFrames(animation)[0];
+  const total = available.reduce((sum, frame) => sum + frame.duration, 0);
+  let cursor = ((Math.max(0, elapsed) % total) + total) % total;
+  for (const frame of available) {
+    if (cursor < frame.duration) return frame;
+    cursor -= frame.duration;
+  }
+  return available[available.length - 1];
+}
+
+function colorizeSpriteLine(line: string, c: AnimColors, frame: AnimationFrame): string {
+  const layers = frame.layers ?? SPRITE_LAYERS;
+  return Array.from(line).map((glyph) => {
+    if (/\s/.test(glyph)) return glyph;
+    const owner = layers.find((layer) => layer.glyphs?.includes(glyph))
+      ?? layers.find((layer) => layer.name === "body")
+      ?? { name: "body" as const, brightness: 0 };
+    const amount = owner.brightness + c.pulseOffset;
+    return c.layer ? c.layer(owner.name, glyph, amount) : c.shade(glyph, amount);
+  }).join("");
+}
+
+export function renderAdvancedAnimation(
+  animation: WorkingAnimation,
+  elapsed: number,
+  phase: AnimationPhase,
+  c: AnimColors,
+): string[] {
+  const frame = selectAnimationFrame(animation, elapsed, phase);
+  return frame.lines.map((line) => colorizeSpriteLine(line, c, frame));
 }
 
 /**
@@ -768,6 +943,11 @@ export interface AnimationRuntime {
   startedAt: number;
   expressionIndex: number;
   expressionChangedAt: number;
+  /** Advanced lifecycle state; optional for persisted/backward-compatible callers. */
+  phase?: AnimationPhase | "idle";
+  phaseStartedAt?: number;
+  lastActive?: boolean;
+  lastToolName?: string | null;
 }
 
 interface EditorContext {
@@ -843,6 +1023,34 @@ export function buildInputSettingItems(
   }, ...visibilityItems];
 }
 
+export function resolveAnimationForSession(
+  config: InputRevampConfig,
+  runtime: AnimationRuntime,
+  reason: string,
+): boolean {
+  runtime.selected = config.animations.working;
+  let persistedRandom = false;
+  if (runtime.selected === "random") {
+    if (reason === "reload") {
+      runtime.resolved = config.animations.lastWorking ?? runtime.resolved;
+    } else {
+      runtime.resolved = pickWorkingAnimation("random", config.animations.lastWorking);
+      config.animations.lastWorking = runtime.resolved;
+      persistedRandom = true;
+    }
+  } else {
+    runtime.resolved = pickWorkingAnimation(runtime.selected, config.animations.lastWorking ?? runtime.resolved);
+  }
+  runtime.startedAt = 0;
+  runtime.expressionIndex = -1;
+  runtime.expressionChangedAt = 0;
+  runtime.phase = undefined;
+  runtime.phaseStartedAt = undefined;
+  runtime.lastActive = undefined;
+  runtime.lastToolName = undefined;
+  return persistedRandom;
+}
+
 export function applyInputSettingValue(
   config: InputRevampConfig,
   runtime: AnimationRuntime,
@@ -854,6 +1062,10 @@ export function applyInputSettingValue(
     runtime.selected = newValue;
     runtime.resolved = pickWorkingAnimation(newValue, config.animations.lastWorking ?? runtime.resolved);
     runtime.startedAt = 0;
+    runtime.phase = undefined;
+    runtime.phaseStartedAt = undefined;
+    runtime.lastActive = undefined;
+    runtime.lastToolName = undefined;
     config.animations.working = newValue;
     if (newValue === "random") config.animations.lastWorking = runtime.resolved;
     return true;
@@ -907,6 +1119,119 @@ export function centerCropToWidth(text: string, maxWidth: number): string {
   const width = visibleWidth(text);
   if (width <= maxWidth) return text;
   return sliceAnsiColumns(text, Math.floor((width - maxWidth) / 2), maxWidth);
+}
+
+export function animationTier(width: number): AnimationTier {
+  if (width >= 28) return "full";
+  if (width >= 16) return "condensed";
+  return "compact";
+}
+
+function ansiSafeLine(line: string, width: number, pad = true): string {
+  if (width <= 0) return "";
+  const clipped = truncateToWidth(line, width, "");
+  // A clipped SGR sequence can otherwise bleed into the editor. The renderer
+  // uses foreground resets per glyph, but the final reset makes this safe for
+  // theme implementations that use a single opening sequence.
+  const safe = /\x1b\[[0-?]*[ -\/]*[@-~]/.test(clipped) ? `${clipped}\x1b[0m` : clipped;
+  return pad ? safe + " ".repeat(Math.max(0, width - visibleWidth(safe))) : safe;
+}
+
+function transitionAnimationPhase(runtime: AnimationRuntime, active: boolean, toolName: string | null, now: number): AnimationPhase | "idle" {
+  if (runtime.phaseStartedAt === undefined || runtime.phase === undefined) {
+    runtime.phase = active ? "enter" : "idle";
+    runtime.phaseStartedAt = now;
+    runtime.lastActive = active;
+    runtime.lastToolName = toolName;
+    return runtime.phase;
+  }
+  const previousActive = runtime.lastActive ?? false;
+  const previousTool = runtime.lastToolName ?? null;
+  if (!active) {
+    if (previousActive && runtime.phase !== "exit") {
+      runtime.phase = "exit";
+      runtime.phaseStartedAt = now;
+    }
+    runtime.lastActive = false;
+    runtime.lastToolName = null;
+    return runtime.phase;
+  }
+  if (!previousActive || runtime.phase === "exit") {
+    runtime.phase = "enter";
+    runtime.phaseStartedAt = now;
+  } else if (runtime.phase === "enter" && now - runtime.phaseStartedAt >= Math.max(1, animationPhaseDuration(runtime.resolved, "enter"))) {
+    runtime.phase = toolName ? "action" : "idle";
+    runtime.phaseStartedAt = now;
+  } else if (runtime.phase !== "enter" && Boolean(toolName) !== Boolean(previousTool)) {
+    runtime.phase = toolName ? "action" : "idle";
+    runtime.phaseStartedAt = now;
+  }
+  runtime.lastActive = true;
+  runtime.lastToolName = toolName;
+  return runtime.phase;
+}
+
+/**
+ * Adaptive renderer for the advanced widget. The old renderWorkingWidgetLines
+ * below remains the compact public API; this renderer is what the widget uses.
+ */
+export function renderAdvancedWorkingWidgetLines(
+  runtime: AnimationRuntime,
+  idle: boolean,
+  toolName: string | null,
+  width: number,
+  accentAnsi: string,
+  now: number = Date.now(),
+): string[] {
+  if (runtime.selected === "off" || width <= 0) return [];
+  const phase = transitionAnimationPhase(runtime, !idle, toolName, now);
+  const phaseElapsed = Math.max(0, now - (runtime.phaseStartedAt ?? now));
+  if (idle && phase === "idle") return [];
+  if (idle && phase === "exit" && phaseElapsed >= Math.max(1, animationPhaseDuration(runtime.resolved, "exit"))) {
+    runtime.phase = "idle";
+    runtime.phaseStartedAt = now;
+    return [];
+  }
+
+  let expression = DEFAULT_TOOL_EXPRESSION;
+  if (!toolName) {
+    if (runtime.expressionIndex < 0 || now - runtime.expressionChangedAt >= 10_000) {
+      const previous = runtime.expressionIndex;
+      let next = Math.floor(Math.random() * THINKING_EXPRESSIONS.length);
+      if (THINKING_EXPRESSIONS.length > 1 && next === previous) next = (next + 1) % THINKING_EXPRESSIONS.length;
+      runtime.expressionIndex = next;
+      runtime.expressionChangedAt = now;
+    }
+    expression = THINKING_EXPRESSIONS[runtime.expressionIndex];
+  }
+  if (runtime.startedAt <= 0) runtime.startedAt = now;
+  const c: AnimColors = {
+    pulseOffset: Math.round(Math.sin(now / 120) * 50),
+    shade: (text, amount) => shadeFgAnsi(accentAnsi, amount, text),
+    layer: (name, text, amount = 0) => {
+      const bias = name === "status" ? -5 : amount;
+      return shadeFgAnsi(accentAnsi, bias, text);
+    },
+  };
+  const tier = animationTier(width);
+  const sprite = renderAdvancedAnimation(runtime.resolved, phaseElapsed, phase === "idle" ? "idle" : phase, c);
+  if (tier === "compact") {
+    // Use the phase's most expressive sprite row so enter/action/exit remain
+    // visibly distinct even when the full multi-line sprite cannot fit.
+    const compact = sprite[Math.floor(sprite.length / 2)]
+      ?? renderWorkingAnimation(runtime.resolved, phaseElapsed, c);
+    const glyphBudget = Math.max(1, Math.min(visibleWidth(compact), Math.floor(width / 3)));
+    const glyphs = centerCropToWidth(compact, glyphBudget);
+    const separator = width > visibleWidth(glyphs) ? " " : "";
+    const expressionBudget = Math.max(0, width - visibleWidth(glyphs) - visibleWidth(separator));
+    const text = truncateToWidth(c.shade(expression, c.pulseOffset), expressionBudget, "");
+    return [ansiSafeLine(`${glyphs}${separator}${text}`, width)];
+  }
+  const body = tier === "full" ? sprite : sprite.filter((_line, index) => index === 0 || index === sprite.length - 1);
+  const output = body.map((line) => ansiSafeLine(line, width));
+  const status = c.layer?.("status", toolName ? `${toolName}: ${expression}` : expression, -5) ?? expression;
+  output.push(ansiSafeLine(status, width));
+  return output;
 }
 
 /** Render the insertion-ordered above-editor working widget. */
@@ -975,9 +1300,6 @@ class WorkingAnimationWidget {
 
   private start(): void {
     if (this.timer || this.runtime.selected === "off") return;
-    this.runtime.startedAt = Date.now();
-    this.runtime.expressionIndex = -1;
-    this.runtime.expressionChangedAt = 0;
     this.timer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* widget may be detached */ }
     }, 50);
@@ -988,19 +1310,24 @@ class WorkingAnimationWidget {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.runtime.startedAt = 0;
+    this.runtime.expressionIndex = -1;
+    this.runtime.expressionChangedAt = 0;
   }
 
   render(width: number): string[] {
     const idle = this.ctx.isIdle();
-    if (!idle && this.runtime.selected !== "off") this.start();
-    else this.stop();
-    return renderWorkingWidgetLines(
+    const lines = renderAdvancedWorkingWidgetLines(
       this.runtime,
       idle,
       activeToolName,
       width,
       this.theme.getFgAnsi("accent"),
     );
+    // Keep the short exit animation alive, but never keep a background timer
+    // once the widget has reached its fully idle state.
+    if (this.runtime.selected !== "off" && (!idle || this.runtime.phase === "exit")) this.start();
+    else this.stop();
+    return lines;
   }
 
   invalidate(): void {}
@@ -1047,16 +1374,36 @@ export class AnimationPreviewMenu {
     this.timer.unref?.();
   }
 
-  private preview(option: WorkingAnimationChoice, elapsed: number): string {
-    if (option === "off") return this.theme.fg("dim", "(hidden)");
-    const resolved = option === "random"
+  private previewResolved(option: WorkingAnimationChoice, elapsed: number): WorkingAnimation | null {
+    if (option === "off") return null;
+    // random intentionally cycles in this menu only. The selected value is
+    // still resolved once by pickWorkingAnimation at session start.
+    return option === "random"
       ? WORKING_ANIMATIONS[Math.floor(elapsed / 800) % WORKING_ANIMATIONS.length]
       : option;
+  }
+
+  private preview(option: WorkingAnimationChoice, elapsed: number): string {
+    const resolved = this.previewResolved(option, elapsed);
+    if (!resolved) return this.theme.fg("dim", "(hidden)");
     const pulseOffset = Math.round(Math.sin(elapsed / 120) * 50);
     return renderWorkingAnimation(resolved, elapsed, {
       shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
       pulseOffset,
     });
+  }
+
+  private expandedPreview(option: WorkingAnimationChoice, elapsed: number, width: number): string[] {
+    const resolved = this.previewResolved(option, elapsed);
+    if (!resolved) return [this.theme.fg("dim", "  preview hidden (off)")];
+    const lines = renderAdvancedAnimation(resolved, elapsed, "idle", {
+      shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
+      pulseOffset: Math.round(Math.sin(elapsed / 120) * 50),
+    });
+    const label = option === "random"
+      ? `  ${option} · cycles examples in preview (session resolves once)`
+      : `  ${resolved} · live expanded preview`;
+    return [this.theme.fg("dim", label), ...lines.slice(0, 3).map((line) => ansiSafeLine(line, width, false))];
   }
 
   render(width: number): string[] {
@@ -1084,8 +1431,12 @@ export class AnimationPreviewMenu {
     if (start > 0 || end < ANIMATION_MENU_OPTIONS.length) {
       lines.push(truncateToWidth(this.theme.fg("dim", `  (${this.selectedIndex + 1}/${ANIMATION_MENU_OPTIONS.length})`), width, ""));
     }
+    // Keep compact previews in each row, while the selected row gets a live
+    // multi-line panel. It is intentionally capped so SettingsList remains
+    // safe in a 24-row terminal even when the list scrolls.
+    lines.push(...this.expandedPreview(ANIMATION_MENU_OPTIONS[this.selectedIndex], elapsed, width));
     lines.push(truncateToWidth(this.theme.fg("dim", " ↑↓ preview · Enter choose · Esc back"), width, ""));
-    return lines;
+    return lines.slice(0, Math.max(1, Math.min(23, lines.length))).map((line) => ansiSafeLine(line, width, false));
   }
 
   handleInput(data: string): void {
@@ -1310,6 +1661,7 @@ class NerismaInputEditor extends CustomEditor {
         try { this.tui.requestRender(); } catch { /* editor may be detached */ }
       }
     }, 1000);
+    this._statusTimer.unref?.();
   }
 
   private _stopStatusPolling() {
@@ -1324,6 +1676,7 @@ class NerismaInputEditor extends CustomEditor {
     this._inputTimer = setInterval(() => {
       try { this.tui.requestRender(); } catch {}
     }, 50);
+    this._inputTimer.unref?.();
   }
 
   private _stopInputAnimation() {
@@ -1339,6 +1692,7 @@ class NerismaInputEditor extends CustomEditor {
     this._dynamicWorkflowTimer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* editor may be detached */ }
     }, 50);
+    this._dynamicWorkflowTimer.unref?.();
   }
 
   private _stopDynamicWorkflowAnimation() {
@@ -1587,6 +1941,7 @@ class NerismaInputEditor extends CustomEditor {
             }
             try { this.tui.requestRender(); } catch {}
           }, 16);
+          this._submitTimer.unref?.();
         }
       }
       this._lastInputText = currentText;
@@ -1704,6 +2059,7 @@ class NerismaInputEditor extends CustomEditor {
             }
             try { this.tui.requestRender(); } catch {}
           }, 16);
+          this._metricTimer.unref?.();
         }
       }
     } else if (!configAnim.metricPulse) {
@@ -1755,6 +2111,7 @@ class NerismaInputEditor extends CustomEditor {
             }
             try { this.tui.requestRender(); } catch {}
           }, 16);
+          this._tokTimer.unref?.();
         }
       }
     } else if (!configAnim.tokPulse) {
@@ -1897,7 +2254,9 @@ export default function (pi: ExtensionAPI): void {
   const config = loadConfig();
   const animationRuntime: AnimationRuntime = {
     selected: config.animations.working,
-    resolved: pickWorkingAnimation(config.animations.working, config.animations.lastWorking),
+    resolved: config.animations.working === "random"
+      ? (config.animations.lastWorking ?? WORKING_ANIMATIONS[0])
+      : pickWorkingAnimation(config.animations.working, config.animations.lastWorking),
     startedAt: 0,
     expressionIndex: -1,
     expressionChangedAt: 0,
@@ -1931,17 +2290,10 @@ export default function (pi: ExtensionAPI): void {
     lastWirePayloadTools = findToolsArray(event.payload);
   });
 
-  pi.on("session_start", (_event, ctx) => {
-    // Resolve random once per session, never per render or per working turn.
-    animationRuntime.selected = config.animations.working;
-    animationRuntime.resolved = pickWorkingAnimation(
-      animationRuntime.selected,
-      config.animations.lastWorking ?? animationRuntime.resolved,
-    );
-    if (animationRuntime.selected === "random") {
-      config.animations.lastWorking = animationRuntime.resolved;
-      saveConfig(config);
-    }
+  pi.on("session_start", (event, ctx) => {
+    // Resolve random once for a real session start/switch, but preserve the
+    // current session's persisted choice across /reload.
+    if (resolveAnimationForSession(config, animationRuntime, event.reason)) saveConfig(config);
     if (registered) return;
     registered = true;
 
@@ -1974,10 +2326,17 @@ export default function (pi: ExtensionAPI): void {
 
   // Track the running tool for the animated expressions.
   pi.on("tool_execution_start", (event) => {
+    activeToolNames.set(event.toolCallId, event.toolName);
     activeToolName = event.toolName;
   });
 
-  pi.on("tool_execution_end", () => {
+  pi.on("tool_execution_end", (event) => {
+    activeToolNames.delete(event.toolCallId);
+    activeToolName = [...activeToolNames.values()].at(-1) ?? null;
+  });
+
+  pi.on("session_shutdown", () => {
+    activeToolNames.clear();
     activeToolName = null;
   });
 }

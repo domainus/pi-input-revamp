@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A typed advanced animation engine with variable frame durations, enter/idle/action/exit
+  phases, theme-safe named color layers, and full/condensed/compact terminal tiers.
+- Live multi-line selected-row panels in the animation submenu; `random` cycles examples
+  only in preview and resolves once per session, while `off` shows its hidden state.
 - Selectable working animations: `wave`, `orbit`, `scanner`, `bounce`,
   `sparkle`, `fairy`, `triforce`, `speedster`, `invader`, `aura`, `ninja`,
   `flame`, `mecha`, and `slime`.
