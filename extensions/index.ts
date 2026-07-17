@@ -883,7 +883,14 @@ function ensureActionLoop(frames: readonly AnimationFrame[]): readonly Animation
     actionLoopFramesCache.set(frames, frames);
     return frames;
   }
-  const recovery = frames.find((frame) => frame.phase !== "action" && !signatures.has(JSON.stringify(frame.lines)));
+  const actionIndex = frames.findIndex((frame) => frame.phase === "action");
+  const distinct = (frame: AnimationFrame) => !signatures.has(JSON.stringify(frame.lines));
+  // Prefer the last idle pose immediately preceding action; it is the closest
+  // authored recovery pose and avoids flashing back to an unrelated boot/enter
+  // frame during a long-running tool call.
+  const recovery = frames.slice(0, actionIndex).reverse().find((frame) => frame.phase === "idle" && distinct(frame))
+    ?? frames.find((frame) => frame.phase === "idle" && distinct(frame))
+    ?? frames.find((frame) => frame.phase !== "action" && distinct(frame));
   if (!recovery) {
     actionLoopFramesCache.set(frames, frames);
     return frames;

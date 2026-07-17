@@ -197,6 +197,8 @@ test("every action phase loops complete distinct poses without skipping at 50ms 
     }
     assert.ok(sampled.size >= 2, `${animation} skipped an action pose at 50ms cadence`);
   }
+  const mechaAction = getAnimationDefinition("mecha").frames.filter((frame) => frame.phase === "action");
+  assert.match(mechaAction[1].semantic ?? "", /mecha-scan-action/, "mecha should recover through its adjacent idle pose, not reboot");
 });
 
 test("held poses are raw-byte stable across incidental global renders", () => {
