@@ -54,7 +54,7 @@ type BuiltinElementId =
  */
 type ElementId = BuiltinElementId | `ext:${string}`;
 
-const WORKING_ANIMATIONS = ["wave", "orbit", "scanner", "bounce", "sparkle"] as const;
+const WORKING_ANIMATIONS = ["wave", "orbit", "scanner", "bounce", "sparkle", "fairy"] as const;
 type WorkingAnimation = typeof WORKING_ANIMATIONS[number];
 type WorkingAnimationChoice = WorkingAnimation | "random";
 
@@ -649,7 +649,7 @@ function renderThinkingGlyphs(elapsed: number, c: AnimColors): string {
   return out;
 }
 
-function renderWorkingAnimation(animation: WorkingAnimation, elapsed: number, c: AnimColors): string {
+export function renderWorkingAnimation(animation: WorkingAnimation, elapsed: number, c: AnimColors): string {
   if (animation === "wave") return renderThinkingGlyphs(elapsed, c);
 
   if (animation === "orbit") {
@@ -674,12 +674,31 @@ function renderWorkingAnimation(animation: WorkingAnimation, elapsed: number, c:
     return Array.from({ length: width }, (_, index) => index === position ? c.shade("◆", 90 + c.pulseOffset) : " ").join("");
   }
 
-  const sparkles = ["·", "✦", "*", "⋆", "·"];
-  const phase = Math.floor(elapsed / 120);
-  return sparkles.map((glyph, index) => {
-    const active = (index + phase) % sparkles.length;
-    return c.shade(active < 2 ? glyph : "·", active < 2 ? 85 - active * 25 : -40);
-  }).join("");
+  if (animation === "sparkle") {
+    const sparkles = ["·", "✦", "*", "⋆", "·"];
+    const phase = Math.floor(elapsed / 120);
+    return sparkles.map((glyph, index) => {
+      const active = (index + phase) % sparkles.length;
+      return c.shade(active < 2 ? glyph : "·", active < 2 ? 85 - active * 25 : -40);
+    }).join("");
+  }
+
+  // Tiny fairy companion: a bright pulsing orb, fluttering wings, and two
+  // orbiting motes. It evokes a familiar forest guide without copying artwork.
+  const fairyFrames = [
+    { leftMote: "·", leftWing: "ʚ", core: "●", rightWing: "ɞ", rightMote: "·" },
+    { leftMote: "✧", leftWing: "‹", core: "◉", rightWing: "›", rightMote: "·" },
+    { leftMote: "·", leftWing: "ʚ", core: "●", rightWing: "ɞ", rightMote: "✦" },
+    { leftMote: "·", leftWing: "‹", core: "◉", rightWing: "›", rightMote: "✧" },
+  ];
+  const frame = fairyFrames[Math.floor(elapsed / 130) % fairyFrames.length];
+  return [
+    c.shade(frame.leftMote, 15 + c.pulseOffset),
+    c.shade(frame.leftWing, 50 + c.pulseOffset),
+    c.shade(frame.core, 105 + c.pulseOffset),
+    c.shade(frame.rightWing, 50 + c.pulseOffset),
+    c.shade(frame.rightMote, 15 + c.pulseOffset),
+  ].join("");
 }
 
 // ── Custom editor ─────────────────────────────────────────

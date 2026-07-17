@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Selectable working animations: `wave`, `orbit`, `scanner`, `bounce`, and
-  `sparkle`.
+- Selectable working animations: `wave`, `orbit`, `scanner`, `bounce`,
+  `sparkle`, and a fairy-companion animation.
 - `/input-settings` TUI for changing and persisting the working animation.
 - `random` working-animation mode, resolved once for every Pi session.
 
