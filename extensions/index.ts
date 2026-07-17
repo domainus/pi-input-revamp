@@ -696,7 +696,7 @@ export type AnimationTier = "full" | "condensed" | "compact";
 /** Terminal-friendly 30 FPS cadence with shorter frame holds to avoid visible stutter. */
 export const WORKING_ANIMATION_TICK_MS = 33;
 export const ANIMATION_PREVIEW_TICK_MS = 33;
-export const ANIMATION_FRAME_TIME_SCALE = 0.65;
+export const ANIMATION_FRAME_TIME_SCALE = 1.25;
 
 function spriteFrame(
   phase: AnimationPhase,
@@ -867,40 +867,15 @@ function colorizeSpriteLine(line: string, c: AnimColors, frame: AnimationFrame, 
       ?? { name: "body" as const, brightness: 0 };
     // A low-amplitude traveling highlight supplies continuous motion between
     // geometry updates without blinking or hiding any terminal cells.
-    const travelingHighlight = Math.round(10 * Math.sin(elapsed / 70 + column * 0.72 + row * 1.1));
+    const travelingHighlight = Math.round(6 * Math.sin(elapsed / 180 + column * 0.48 + row * 0.8));
     const amount = owner.brightness + c.pulseOffset + travelingHighlight;
     return c.layer ? c.layer(owner.name, glyph, amount) : c.shade(glyph, amount);
   }).join("");
 }
 
-export interface AnimationRowState {
+interface AnimationRowState {
   readonly line: string;
   readonly frame: AnimationFrame;
-}
-
-export function staggerCompleteRows(source: readonly string[], target: readonly string[], progress: number): string[] {
-  const lineCount = Math.max(source.length, target.length);
-  const clamped = Math.max(0, Math.min(1, progress));
-  return Array.from({ length: lineCount }, (_unused, row) => {
-    const threshold = lineCount <= 1 ? 0.5 : 0.22 + (row / (lineCount - 1)) * 0.56;
-    return clamped >= threshold ? (target[row] ?? "") : (source[row] ?? "");
-  });
-}
-
-function staggerAnimationRows(
-  source: readonly AnimationRowState[],
-  target: readonly AnimationRowState[],
-  progress: number,
-): AnimationRowState[] {
-  const lineCount = Math.max(source.length, target.length);
-  const clamped = Math.max(0, Math.min(1, progress));
-  return Array.from({ length: lineCount }, (_unused, row) => {
-    const threshold = lineCount <= 1 ? 0.5 : 0.22 + (row / (lineCount - 1)) * 0.56;
-    const fallbackFrame = (source[row]?.frame ?? target[row]?.frame ?? source[0]?.frame ?? target[0]?.frame)!;
-    return clamped >= threshold
-      ? (target[row] ?? { line: "", frame: fallbackFrame })
-      : (source[row] ?? { line: "", frame: fallbackFrame });
-  });
 }
 
 function selectAnimationRows(
@@ -908,13 +883,8 @@ function selectAnimationRows(
   elapsed: number,
   phase: AnimationPhase,
 ): AnimationRowState[] {
-  const transition = sampleAnimationFrameTransition(animation, elapsed, phase);
-  const lineCount = Math.max(transition.current.lines.length, transition.next.lines.length);
-  return Array.from({ length: lineCount }, (_unused, row) => {
-    const threshold = lineCount <= 1 ? 0.5 : 0.22 + (row / (lineCount - 1)) * 0.56;
-    const frame = transition.progress >= threshold ? transition.next : transition.current;
-    return { line: frame.lines[row] ?? "", frame };
-  });
+  const frame = sampleAnimationFrameTransition(animation, elapsed, phase).current;
+  return frame.lines.map((line) => ({ line, frame }));
 }
 
 function colorizeAnimationRows(rows: readonly AnimationRowState[], c: AnimColors, motionElapsed: number): string[] {
@@ -1065,11 +1035,6 @@ export interface AnimationRuntime {
   phaseStartedAt?: number;
   lastActive?: boolean;
   lastToolName?: string | null;
-  transitionFromPhase?: AnimationPhase;
-  transitionFromElapsed?: number;
-  transitionFromRows?: readonly AnimationRowState[];
-  transitionStartedAt?: number;
-  displayedRows?: readonly AnimationRowState[];
 }
 
 interface EditorContext {
@@ -1170,11 +1135,6 @@ export function resolveAnimationForSession(
   runtime.phaseStartedAt = undefined;
   runtime.lastActive = undefined;
   runtime.lastToolName = undefined;
-  runtime.transitionFromPhase = undefined;
-  runtime.transitionFromElapsed = undefined;
-  runtime.transitionFromRows = undefined;
-  runtime.transitionStartedAt = undefined;
-  runtime.displayedRows = undefined;
   return persistedRandom;
 }
 
@@ -1193,11 +1153,6 @@ export function applyInputSettingValue(
     runtime.phaseStartedAt = undefined;
     runtime.lastActive = undefined;
     runtime.lastToolName = undefined;
-    runtime.transitionFromPhase = undefined;
-    runtime.transitionFromElapsed = undefined;
-    runtime.transitionFromRows = undefined;
-    runtime.transitionStartedAt = undefined;
-    runtime.displayedRows = undefined;
     config.animations.working = newValue;
     if (newValue === "random") config.animations.lastWorking = runtime.resolved;
     return true;
@@ -1273,11 +1228,6 @@ function transitionAnimationPhase(runtime: AnimationRuntime, active: boolean, to
   if (runtime.phaseStartedAt === undefined || runtime.phase === undefined) {
     runtime.phase = active ? "enter" : "idle";
     runtime.phaseStartedAt = now;
-    runtime.transitionFromPhase = undefined;
-    runtime.transitionFromElapsed = undefined;
-    runtime.transitionFromRows = undefined;
-    runtime.transitionStartedAt = undefined;
-    runtime.displayedRows = undefined;
     runtime.lastActive = active;
     runtime.lastToolName = toolName;
     return runtime.phase;
@@ -1286,13 +1236,8 @@ function transitionAnimationPhase(runtime: AnimationRuntime, active: boolean, to
   const previousTool = runtime.lastToolName ?? null;
   const moveTo = (next: AnimationPhase): void => {
     if (runtime.phase === next) return;
-    const sourceRows = runtime.displayedRows;
-    runtime.transitionFromPhase = sourceRows ? runtime.phase : undefined;
-    runtime.transitionFromElapsed = sourceRows ? Math.max(0, now - runtime.phaseStartedAt!) : undefined;
-    runtime.transitionFromRows = sourceRows ? sourceRows.map((row) => ({ ...row })) : undefined;
-    runtime.transitionStartedAt = sourceRows ? now : undefined;
     runtime.phase = next;
-    runtime.phaseStartedAt = sourceRows ? now + WORKING_ANIMATION_TICK_MS * 3 : now;
+    runtime.phaseStartedAt = now;
   };
   if (!active) {
     if (previousActive && runtime.phase !== "exit") moveTo("exit");
@@ -1411,24 +1356,11 @@ export function renderAdvancedWorkingWidgetLines(
   if (runtime.selected === "off" || width <= 0) return [];
   const phase = transitionAnimationPhase(runtime, !idle, toolName, now);
   const phaseElapsed = Math.max(0, now - (runtime.phaseStartedAt ?? now));
-  if (idle && phase === "idle") {
-    runtime.transitionFromPhase = undefined;
-    runtime.transitionFromElapsed = undefined;
-    runtime.transitionFromRows = undefined;
-    runtime.transitionStartedAt = undefined;
-    runtime.displayedRows = undefined;
-    return [];
-  }
-  const rowTransitionMs = WORKING_ANIMATION_TICK_MS * 3;
+  if (idle && phase === "idle") return [];
   const exitDuration = Math.max(1, animationPhaseDuration(runtime.resolved, "exit"));
-  if (idle && phase === "exit" && phaseElapsed >= exitDuration + rowTransitionMs) {
+  if (idle && phase === "exit" && phaseElapsed >= exitDuration) {
     runtime.phase = "idle";
     runtime.phaseStartedAt = now;
-    runtime.transitionFromPhase = undefined;
-    runtime.transitionFromElapsed = undefined;
-    runtime.transitionFromRows = undefined;
-    runtime.transitionStartedAt = undefined;
-    runtime.displayedRows = undefined;
     return [];
   }
 
@@ -1445,7 +1377,7 @@ export function renderAdvancedWorkingWidgetLines(
   }
   if (runtime.startedAt <= 0) runtime.startedAt = now;
   const c: AnimColors = {
-    pulseOffset: Math.round(Math.sin(now / 120) * 12),
+    pulseOffset: Math.round(Math.sin(now / 240) * 8),
     shade: (text, amount) => shadeFgAnsi(accentAnsi, amount, text),
     layer: (name, text, amount = 0) => {
       const bias = name === "status" ? -5 : amount;
@@ -1455,23 +1387,7 @@ export function renderAdvancedWorkingWidgetLines(
   const tier = animationTier(width);
   const targetPhase = phase as AnimationPhase;
   const motionElapsed = Math.max(0, now - runtime.startedAt);
-  let rows = selectAnimationRows(runtime.resolved, phaseElapsed, targetPhase);
-  if (runtime.transitionStartedAt !== undefined && runtime.transitionFromRows) {
-    const transitionAge = Math.max(0, now - runtime.transitionStartedAt);
-    if (transitionAge < rowTransitionMs) {
-      rows = staggerAnimationRows(runtime.transitionFromRows, rows, transitionAge / rowTransitionMs);
-    } else {
-      runtime.transitionFromPhase = undefined;
-      runtime.transitionFromElapsed = undefined;
-      runtime.transitionFromRows = undefined;
-      runtime.transitionStartedAt = undefined;
-    }
-  }
-  if (idle && targetPhase === "exit" && phaseElapsed >= exitDuration) {
-    const source = selectAnimationRows(runtime.resolved, exitDuration - 1, "exit");
-    rows = staggerAnimationRows(source, [], (phaseElapsed - exitDuration) / rowTransitionMs);
-  }
-  runtime.displayedRows = rows.map((row) => ({ ...row }));
+  const rows = selectAnimationRows(runtime.resolved, phaseElapsed, targetPhase);
   const sprite = colorizeAnimationRows(rows, c, motionElapsed);
   if (tier === "compact") {
     // Use the phase's most expressive sprite row so enter/action/exit remain
@@ -1485,7 +1401,7 @@ export function renderAdvancedWorkingWidgetLines(
     const text = renderAnimationStatusText(
       runtime.resolved,
       expression,
-      motionElapsed,
+      Math.floor(motionElapsed * 0.65),
       accentAnsi,
       expressionBudget,
     );
@@ -1495,7 +1411,7 @@ export function renderAdvancedWorkingWidgetLines(
   const output = body.map((line) => ansiSafeLine(line, width));
   const statusText = toolName ? `${toolName}: ${expression}` : expression;
   output.push(ansiSafeLine(
-    renderAnimationStatusText(runtime.resolved, statusText, motionElapsed, accentAnsi, width),
+    renderAnimationStatusText(runtime.resolved, statusText, Math.floor(motionElapsed * 0.65), accentAnsi, width),
     width,
   ));
   return output;
@@ -1673,35 +1589,12 @@ export class AnimationPreviewMenu {
   } | null {
     const resolved = this.previewResolved(option, elapsed);
     if (!resolved) return null;
-    const rowTransitionMs = ANIMATION_PREVIEW_TICK_MS * 3;
-    const rawMoment = animationPreviewMoment(elapsed);
-    const moment = { phase: rawMoment.phase, elapsed: Math.max(0, rawMoment.elapsed - rowTransitionMs) };
+    const moment = animationPreviewMoment(elapsed);
     const colors: AnimColors = {
       shade: createAccentShader(this.theme.getFgAnsi("accent")),
-      pulseOffset: Math.round(Math.sin(elapsed / 120) * 12),
+      pulseOffset: Math.round(Math.sin(elapsed / 240) * 8),
     };
-    let lines = renderAdvancedAnimation(resolved, moment.elapsed, moment.phase, colors, elapsed);
-    const cycleElapsed = ((elapsed % ANIMATION_PREVIEW_CYCLE_MS) + ANIMATION_PREVIEW_CYCLE_MS) % ANIMATION_PREVIEW_CYCLE_MS;
-    const phaseStart = rawMoment.phase === "enter" ? 0 : rawMoment.phase === "idle" ? 600 : rawMoment.phase === "action" ? 1_800 : 2_800;
-    const boundaryAge = cycleElapsed - phaseStart;
-    const hasPreviousPhase = rawMoment.phase !== "enter" || elapsed >= ANIMATION_PREVIEW_CYCLE_MS;
-    if (boundaryAge < rowTransitionMs && hasPreviousPhase) {
-      const previousElapsed = Math.max(0, elapsed - boundaryAge - 1);
-      const previousResolved = this.previewResolved(option, previousElapsed) ?? resolved;
-      const previousRawMoment = animationPreviewMoment(previousElapsed);
-      const previousMoment = {
-        phase: previousRawMoment.phase,
-        elapsed: Math.max(0, previousRawMoment.elapsed - rowTransitionMs),
-      };
-      const source = renderAdvancedAnimation(
-        previousResolved,
-        previousMoment.elapsed,
-        previousMoment.phase,
-        colors,
-        elapsed,
-      );
-      lines = staggerCompleteRows(source, lines, boundaryAge / rowTransitionMs);
-    }
+    const lines = renderAdvancedAnimation(resolved, moment.elapsed, moment.phase, colors, elapsed);
     return { resolved, moment, lines };
   }
 
@@ -1722,7 +1615,7 @@ export class AnimationPreviewMenu {
     const sampleStatus = renderAnimationStatusText(
       resolved,
       "thinking hard...",
-      elapsed,
+      Math.floor(elapsed * 0.65),
       this.theme.getFgAnsi("accent"),
       Math.max(0, width - 2),
     );

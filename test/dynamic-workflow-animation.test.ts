@@ -118,43 +118,52 @@ test("advanced definitions select variable-duration phase frames and preserve sl
   assert.ok(definition.frames.some((frame) => frame.phase === "action"));
   assert.ok(definition.frames.some((frame) => frame.phase === "exit"));
   assert.ok(new Set(definition.frames.map((frame) => frame.duration)).size > 1);
-  assert.equal(animationPhaseDuration("slime", "enter"), 137);
+  assert.equal(animationPhaseDuration("slime", "enter"), 263);
   assert.ok(definition.frames.some((frame) => frame.semantic === "slime-wobble"));
   assert.equal(selectAnimationFrame("slime", 0, "idle").semantic, "slime-round");
-  assert.equal(selectAnimationFrame("slime", 155, "idle").semantic, "slime-wobble");
+  assert.equal(selectAnimationFrame("slime", 200, "idle").semantic, "slime-wobble");
   assert.equal(selectAnimationFrame("slime", 0, "action").semantic, "slime-bounce");
-});
-
-test("animation cadence avoids long frame holds and low-refresh preview stutter", () => {
-  assert.equal(WORKING_ANIMATION_TICK_MS, 33);
-  assert.equal(ANIMATION_PREVIEW_TICK_MS, 33);
-  assert.equal(ANIMATION_FRAME_TIME_SCALE, 0.65);
-  for (const animation of WORKING_ANIMATIONS) {
-    const durations = getAnimationDefinition(animation).frames.map((frame) => frame.duration);
-    assert.ok(Math.max(...durations) <= 124, `${animation} retained a ${Math.max(...durations)}ms frame hold`);
+  const plain = { shade: (text: string) => text, pulseOffset: 0 };
+  for (const phase of ["enter", "exit"] as const) {
+    const phaseFrames = definition.frames.filter((frame) => frame.phase === phase);
+    const finalLines = [...phaseFrames.at(-1)!.lines];
+    const duration = animationPhaseDuration("slime", phase);
+    assert.deepEqual(renderAdvancedAnimation("slime", duration + 1, phase, plain), finalLines);
+    assert.deepEqual(renderAdvancedAnimation("slime", duration + 800, phase, plain), finalLines);
   }
 });
 
-test("advanced sprites use intact-row intermediate frames without conceal flicker", () => {
+test("animation cadence keeps refresh smooth while full-sprite poses remain gentle", () => {
+  assert.equal(WORKING_ANIMATION_TICK_MS, 33);
+  assert.equal(ANIMATION_PREVIEW_TICK_MS, 33);
+  assert.equal(ANIMATION_FRAME_TIME_SCALE, 1.25);
+  for (const animation of WORKING_ANIMATIONS) {
+    const durations = getAnimationDefinition(animation).frames.map((frame) => frame.duration);
+    assert.ok(Math.max(...durations) <= 238, `${animation} retained an excessive ${Math.max(...durations)}ms frame hold`);
+  }
+});
+
+test("advanced sprites always render stable full poses without conceal or hybrid rows", () => {
   assert.equal(containsConcealSgr("\x1b[1;8mhidden\x1b[28m"), true);
   assert.equal(containsConcealSgr("\x1b[38;5;8mgray\x1b[39m"), false);
   assert.equal(containsConcealSgr("\x1b[38;2;8;80;180mcolor\x1b[39m"), false);
-  const transition = sampleAnimationFrameTransition("slime", 40, "idle");
-  const rendered = renderAdvancedAnimation("slime", 40, "idle", {
-    shade: (text) => text,
-    pulseOffset: 0,
-  });
-  assert.equal(rendered[0], transition.next.lines[0], "top row did not advance into an intermediate pose");
-  assert.equal(rendered[1], transition.current.lines[1], "face row was split or advanced too early");
-  assert.equal(rendered[2], transition.current.lines[2], "base row was split or advanced too early");
   for (const animation of WORKING_ANIMATIONS) {
     for (const phase of ["enter", "idle", "action", "exit"] as const) {
       for (const elapsed of [0, 33, 66, 99, 132, 264]) {
-        const output = renderAdvancedAnimation(animation, elapsed, phase, {
+        const plain = renderAdvancedAnimation(animation, elapsed, phase, {
+          shade: (text) => text,
+          pulseOffset: 0,
+        });
+        const phaseFrames = getAnimationDefinition(animation).frames.filter((frame) => frame.phase === phase);
+        assert.ok(
+          phaseFrames.some((frame) => JSON.stringify(plain) === JSON.stringify(frame.lines)),
+          `${animation}/${phase} rendered a hybrid pose`,
+        );
+        const colored = renderAdvancedAnimation(animation, elapsed, phase, {
           shade: (text, amount) => `\x1b[38;2;${100 + Math.max(-100, Math.min(100, amount))};180;255m${text}\x1b[39m`,
           pulseOffset: 0,
         }).join("\n");
-        assert.equal(containsConcealSgr(output), false, `${animation}/${phase} concealed a frame`);
+        assert.equal(containsConcealSgr(colored), false, `${animation}/${phase} concealed a frame`);
       }
     }
     for (const phase of ["enter", "exit"] as const) {
@@ -261,34 +270,29 @@ test("advanced renderer adapts tiers, closes ANSI, and transitions enter/action/
   const runtime: AnimationRuntime = { selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0 };
   renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_000);
   assert.equal(runtime.phase, "enter");
-  renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_132);
-  const sourceRows = getAnimationDefinition("slime").frames.filter((frame) => frame.phase === "enter").at(-1)!.lines.map((line) => line.trimEnd());
-  const targetRows = getAnimationDefinition("slime").frames.find((frame) => frame.phase === "idle")!.lines.map((line) => line.trimEnd());
-  const spriteRows = (lines: string[]) => lines.slice(0, 3).map((line) => stripAnsi(line).trimEnd());
-  const transitionStart = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_210);
+  const enterDuration = animationPhaseDuration("slime", "enter");
+  renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_000 + enterDuration - 1);
+  const firstIdle = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_000 + enterDuration);
   assert.equal(runtime.phase, "idle");
-  assert.deepEqual(spriteRows(transitionStart), [...sourceRows], "phase boundary replaced every row immediately");
-  const firstIntermediate = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_243);
-  assert.deepEqual(spriteRows(firstIntermediate), [targetRows[0], sourceRows[1], sourceRows[2]]);
-  const secondIntermediate = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_276);
-  assert.deepEqual(spriteRows(secondIntermediate), [targetRows[0], targetRows[1], sourceRows[2]]);
-  const firstIdle = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_309);
-  assert.deepEqual(spriteRows(firstIdle), [...targetRows]);
-  renderAdvancedWorkingWidgetLines(runtime, false, "bash", 40, accentAnsi, 1_320);
+  assert.match(stripAnsi(firstIdle.join("\n")), /╭───╮/, "idle phase did not begin with its complete opening pose");
+  renderAdvancedWorkingWidgetLines(runtime, false, "bash", 40, accentAnsi, 1_000 + enterDuration + 10);
   assert.equal(runtime.phase, "action");
-  renderAdvancedWorkingWidgetLines(runtime, false, "bash", 40, accentAnsi, 1_420);
-  const exiting = renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_450);
+  const exitStartedAt = 1_000 + enterDuration + 20;
+  const exiting = renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, exitStartedAt);
   assert.ok(exiting.length > 0);
   assert.equal(runtime.phase, "exit");
-  assert.deepEqual(renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_800), []);
+  assert.deepEqual(
+    renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, exitStartedAt + animationPhaseDuration("slime", "exit")),
+    [],
+  );
   assert.equal(runtime.phase, "idle");
 
   const compactRuntime: AnimationRuntime = { selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0 };
   const compactEnter = stripAnsi(renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_000)[0]);
-  renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_210);
-  renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_310);
-  renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_320);
-  const compactAction = stripAnsi(renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_500)[0]);
+  const compactEnterDuration = animationPhaseDuration("slime", "enter");
+  renderAdvancedWorkingWidgetLines(compactRuntime, false, null, 15, accentAnsi, 3_000 + compactEnterDuration);
+  renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_000 + compactEnterDuration + 10);
+  const compactAction = stripAnsi(renderAdvancedWorkingWidgetLines(compactRuntime, false, "bash", 15, accentAnsi, 3_000 + compactEnterDuration + 160)[0]);
   assert.match(compactEnter, /╭───╮/, "compact enter lost its phase-specific dome");
   assert.match(compactAction, />ᴗ</, "compact action did not use its phase-specific face");
   assert.notEqual(compactEnter, compactAction);
@@ -302,35 +306,16 @@ test("advanced renderer adapts tiers, closes ANSI, and transitions enter/action/
   }
 });
 
-test("hidden-idle activation and interrupted row transitions preserve displayed geometry", () => {
+test("hidden-idle activation starts from the complete enter pose", () => {
   const accentAnsi = "\x1b[38;2;77;163;255m";
   const normalize = (lines: string[]) => lines.slice(0, 3).map((line) => stripAnsi(line).trimEnd());
   const enterRows = getAnimationDefinition("slime").frames.find((frame) => frame.phase === "enter")!.lines.map((line) => line.trimEnd());
-
-  const startup: AnimationRuntime = {
+  const runtime: AnimationRuntime = {
     selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0,
   };
-  assert.deepEqual(renderAdvancedWorkingWidgetLines(startup, true, null, 40, accentAnsi, 1_000), []);
-  const activated = renderAdvancedWorkingWidgetLines(startup, false, null, 40, accentAnsi, 1_100);
-  assert.deepEqual(normalize(activated), enterRows, "hidden idle was invented as the activation source");
-
-  const interrupted: AnimationRuntime = {
-    selected: "slime", resolved: "slime", startedAt: 0, expressionIndex: -1, expressionChangedAt: 0,
-  };
-  renderAdvancedWorkingWidgetLines(interrupted, false, null, 40, accentAnsi, 2_000);
-  renderAdvancedWorkingWidgetLines(interrupted, false, null, 40, accentAnsi, 2_210);
-  const partial = renderAdvancedWorkingWidgetLines(interrupted, false, null, 40, accentAnsi, 2_243);
-  const restarted = renderAdvancedWorkingWidgetLines(interrupted, false, "bash", 40, accentAnsi, 2_250);
-  assert.deepEqual(normalize(restarted), normalize(partial), "interruption reconstructed a complete target sprite");
-
-  const exitDuration = animationPhaseDuration("slime", "exit");
-  const blanking: AnimationRuntime = {
-    selected: "slime", resolved: "slime", startedAt: 1, expressionIndex: 0, expressionChangedAt: 1,
-    phase: "exit", phaseStartedAt: 3_000, lastActive: false, lastToolName: null,
-  };
-  const partiallyBlank = renderAdvancedWorkingWidgetLines(blanking, true, null, 40, accentAnsi, 3_000 + exitDuration + 33);
-  const reactivated = renderAdvancedWorkingWidgetLines(blanking, false, null, 40, accentAnsi, 3_000 + exitDuration + 40);
-  assert.deepEqual(normalize(reactivated), normalize(partiallyBlank), "reactivation resurrected blanked exit rows");
+  assert.deepEqual(renderAdvancedWorkingWidgetLines(runtime, true, null, 40, accentAnsi, 1_000), []);
+  const activated = renderAdvancedWorkingWidgetLines(runtime, false, null, 40, accentAnsi, 1_100);
+  assert.deepEqual(normalize(activated), enterRows);
 });
 
 test("config merging preserves layout while visibility and animation-off remain backward compatible", () => {
@@ -390,7 +375,7 @@ test("animation preview showcase cycles through every advanced lifecycle phase",
   assert.equal(resolveAnimationPreviewOption("off", 0), null);
 });
 
-test("preview phase boundaries stagger complete rows with a continuous motion clock", () => {
+test("preview always uses complete stable poses at phase boundaries", () => {
   const menu = new AnimationPreviewMenu(
     { requestRender() {} } as any,
     {
@@ -402,15 +387,12 @@ test("preview phase boundaries stagger complete rows with a continuous motion cl
     "slime",
     () => {},
   );
-  const rowsAt = (elapsed: number) => (menu as any).previewSprite("slime", elapsed).lines.map((line: string) => stripAnsi(line).trimEnd());
-  const source = rowsAt(1_799);
-  const start = rowsAt(1_800);
-  const first = rowsAt(1_833);
-  const second = rowsAt(1_866);
-  const target = rowsAt(1_899);
-  assert.deepEqual(start, source, "preview replaced all rows at idle→action boundary");
-  assert.deepEqual(first, [target[0], source[1], source[2]]);
-  assert.deepEqual(second, [target[0], target[1], source[2]]);
+  for (const elapsed of [1_799, 1_800, 1_833, 2_799, 2_800]) {
+    const sprite = (menu as any).previewSprite("slime", elapsed);
+    const rows = sprite.lines.map((line: string) => stripAnsi(line));
+    const frames = getAnimationDefinition("slime").frames.filter((frame) => frame.phase === sprite.moment.phase);
+    assert.ok(frames.some((frame) => JSON.stringify(rows) === JSON.stringify(frame.lines)), `preview rendered a hybrid pose at ${elapsed}`);
+  }
   menu.dispose();
 });
 

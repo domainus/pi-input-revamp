@@ -177,10 +177,10 @@ combining marks, flags, ZWJ emoji, and CJK—and use only the active theme accen
 bold/dim intensity fallback. The selected settings preview includes the matching sample text.
 
 The Working animation submenu now drives every row from the same advanced sprite engine and
-adds a full live panel for the selected row. Both widget and preview use a 30 FPS cadence,
-short frame holds, a low-amplitude traveling highlight, and staggered whole-row geometry updates.
-Rows remain fully visible—there are no conceal-based fades—so faces and symbols stay intact without
-flickering. Its repeating showcase visibly steps through
+adds a full live panel for the selected row. Both widget and preview refresh at 30 FPS, while
+full-sprite poses use a deliberately gentle 100–238 ms cadence. Geometry never tears row-by-row,
+blends hybrid glyphs, or hides for a crossfade; subtle low-amplitude lighting and slower text effects
+provide continuous motion between stable poses. Its repeating showcase visibly steps through
 `ENTER`, `IDLE`, `ACTION`, and `EXIT`, so the picker previews the actual phased art rather than
 the legacy one-line loop. `random` changes examples after each complete showcase (but resolves
 once per actual pi session), and `off` explicitly previews the hidden state.
