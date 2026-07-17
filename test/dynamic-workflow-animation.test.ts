@@ -135,6 +135,36 @@ test("advanced definitions select variable-duration phase frames and preserve sl
   }
 });
 
+test("advanced sprite rows share one centered canvas across every frame and phase", () => {
+  for (const animation of WORKING_ANIMATIONS) {
+    const frames = getAnimationDefinition(animation).frames;
+    const canvasWidths = new Set(frames.flatMap((frame) => frame.lines.map((line) => visibleWidth(line))));
+    assert.equal(canvasWidths.size, 1, `${animation} rows drifted across frames`);
+    const canvasWidth = [...canvasWidths][0];
+    assert.ok(canvasWidth > 0, `${animation} has an empty canvas`);
+    for (const frame of frames) {
+      for (const line of frame.lines) {
+        const content = line.trim();
+        if (content.length === 0) continue;
+        const contentWidth = visibleWidth(content);
+        const contentStart = line.indexOf(content);
+        const left = visibleWidth(line.slice(0, contentStart));
+        const right = visibleWidth(line.slice(contentStart + content.length));
+        assert.equal(left + contentWidth + right, canvasWidth, `${animation}/${frame.semantic} width accounting`);
+        assert.ok(Math.abs(left - right) <= 1, `${animation}/${frame.semantic} row was not centered`);
+      }
+    }
+  }
+
+  const mechaAction = getAnimationDefinition("mecha").frames.find((frame) => frame.semantic === "mecha-action")!;
+  const actionCanvas = visibleWidth(mechaAction.lines[0]);
+  assert.deepEqual(mechaAction.lines.map((line) => visibleWidth(line)), [actionCanvas, actionCanvas, actionCanvas]);
+  assert.ok(mechaAction.lines.every((line) => Math.abs(
+    visibleWidth(line.slice(0, line.indexOf(line.trim())))
+      - visibleWidth(line.slice(line.indexOf(line.trim()) + line.trim().length)),
+  ) <= 1), "mecha action rows formed a diagonal instead of a centered pose");
+});
+
 test("animation cadence keeps refresh smooth while full-sprite poses remain gentle", () => {
   assert.equal(WORKING_ANIMATION_TICK_MS, 100);
   assert.equal(ANIMATION_PREVIEW_TICK_MS, 100);

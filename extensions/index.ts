@@ -822,17 +822,40 @@ const ADVANCED_SPRITES: Partial<Record<WorkingAnimation, readonly AnimationFrame
   ],
 };
 
+/**
+ * Normalize one animation's authored rows onto a shared canvas.
+ *
+ * Sprite art is authored with convenient per-row whitespace, but that padding
+ * is not a reliable positioning contract: rows from different poses can have
+ * different outer margins. Strip only outer whitespace (internal spaces remain
+ * part of the glyph art), then center every row against the widest row in the
+ * animation. This happens before ANSI coloring so terminal width and clipping
+ * remain deterministic.
+ */
+export function normalizeAnimationFrames(frames: readonly AnimationFrame[]): readonly AnimationFrame[] {
+  const trimmed = frames.map((frame) => frame.lines.map((line) => line.trim()));
+  const canvasWidth = Math.max(0, ...trimmed.flatMap((lines) => lines.map((line) => visibleWidth(line))));
+  return frames.map((frame, frameIndex) => ({
+    ...frame,
+    lines: trimmed[frameIndex].map((line) => {
+      const lineWidth = visibleWidth(line);
+      const left = Math.floor((canvasWidth - lineWidth) / 2);
+      return `${" ".repeat(left)}${line}${" ".repeat(canvasWidth - left - lineWidth)}`;
+    }),
+  }));
+}
+
 function animationFrames(animation: WorkingAnimation): readonly AnimationFrame[] {
   const dedicated = ADVANCED_SPRITES[animation];
-  if (dedicated) return dedicated;
+  if (dedicated) return normalizeAnimationFrames(dedicated);
   const plain = (elapsed: number) => renderWorkingAnimation(animation, elapsed, { shade: (s) => s, pulseOffset: 0 });
-  return [
+  return normalizeAnimationFrames([
     spriteFrame("enter", 90, [`· ${plain(0)}`], `${animation}-enter`),
     spriteFrame("idle", 120, [plain(0)], `${animation}-idle-1`),
     spriteFrame("idle", 120, [plain(120)], `${animation}-idle-2`),
     spriteFrame("action", 90, [`‹${plain(180)}›`], `${animation}-action`),
     spriteFrame("exit", 100, [`${plain(240)} ·`], `${animation}-exit`),
-  ];
+  ]);
 }
 
 export function getAnimationDefinition(animation: WorkingAnimation): AnimationDefinition {
