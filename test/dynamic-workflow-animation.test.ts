@@ -68,15 +68,15 @@ test("every working animation has stable terminal width across ANSI-colored fram
   }
 });
 
-test("slime animation visibly grows a face and squashes into a blob", () => {
+test("slime animation keeps a cute round face while wobbling and squashing", () => {
   const plain = (elapsed: number) => renderWorkingAnimation("slime", elapsed, {
     shade: (text) => text,
     pulseOffset: 0,
   });
-  const frames = [0, 145, 290, 435, 580].map(plain);
-  assert.ok(frames.some((frame) => frame.includes("•ᴗ•")), "slime never formed a face");
-  assert.ok(frames.some((frame) => frame.includes("╭(•ᴗ•)╮")), "slime never formed a rounded body");
-  assert.ok(frames.some((frame) => frame.includes("╰──•ᴗ•──╯")), "slime never squashed");
+  const frames = [0, 155, 310, 465, 620, 775].map(plain);
+  assert.ok(frames.some((frame) => frame.includes("• ᴗ •")), "slime never formed its wide cute face");
+  assert.ok(frames.some((frame) => frame.includes("╭── •ᴗ• ──╮")), "slime never performed its elastic squash");
+  assert.ok(frames.some((frame) => frame.includes("╰ •ᴗ• ╯")), "slime never completed its wobble");
   assert.ok(frames.every((frame) => visibleWidth(frame) === 11));
 });
 

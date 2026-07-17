@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `random` and `off` working-animation modes.
 - The working animation now renders above active subagent/workflow status boxes.
 - Game/anime-inspired animations use wider, multi-stage silhouettes; the slime
-  now grows a face, rounds into a blob, and visibly squashes.
+  now resembles a cute blue isekai slime with a round smiling face, wobble, and
+  elastic squash.
 
 ## [1.2.0] - 2026-06-30
 

@@ -744,7 +744,16 @@ export function renderWorkingAnimation(animation: WorkingAnimation, elapsed: num
     return themedFrame(["   [·─·]   ", "  ╾[●─●]╼  ", "  ╾[◉═◉]╼  ", " ╾═[◆─◆]═╼ "], 115);
   }
   if (animation === "slime") {
-    return themedFrame(["     •     ", "   ╭───╮   ", "   ╭•ᴗ•╮   ", "  ╭(•ᴗ•)╮  ", " ╰──•ᴗ•──╯ "], 145);
+    // Cute blue-isekai-slime silhouette: round dome, simple dot eyes, a tiny
+    // smile, side-to-side wobble, and a broad elastic squash.
+    return themedFrame([
+      " ╭ • ᴗ • ╮ ",
+      "╭── •ᴗ• ──╮",
+      " ╰ • ᴗ • ╯ ",
+      "  ╰ •ᴗ• ╯  ",
+      "  ╭ • • ╮  ",
+      " ╭ • ᴗ • ╮ ",
+    ], 155);
   }
 
   const exhaustive: never = animation;
