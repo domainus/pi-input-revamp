@@ -7,6 +7,9 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import installInputRevamp, {
   AnimationPreviewMenu,
   ANIMATION_PREVIEW_CYCLE_MS,
+  ANIMATION_PREVIEW_TICK_MS,
+  ANIMATION_FRAME_TIME_SCALE,
+  WORKING_ANIMATION_TICK_MS,
   animationPreviewMoment,
   resolveAnimationPreviewOption,
   INPUT_SETTINGS_VISIBLE_ROWS,
@@ -97,11 +100,21 @@ test("advanced definitions select variable-duration phase frames and preserve sl
   assert.ok(definition.frames.some((frame) => frame.phase === "action"));
   assert.ok(definition.frames.some((frame) => frame.phase === "exit"));
   assert.ok(new Set(definition.frames.map((frame) => frame.duration)).size > 1);
-  assert.equal(animationPhaseDuration("slime", "enter"), 210);
+  assert.equal(animationPhaseDuration("slime", "enter"), 137);
   assert.ok(definition.frames.some((frame) => frame.semantic === "slime-wobble"));
   assert.equal(selectAnimationFrame("slime", 0, "idle").semantic, "slime-round");
   assert.equal(selectAnimationFrame("slime", 155, "idle").semantic, "slime-wobble");
   assert.equal(selectAnimationFrame("slime", 0, "action").semantic, "slime-bounce");
+});
+
+test("animation cadence avoids long frame holds and low-refresh preview stutter", () => {
+  assert.equal(WORKING_ANIMATION_TICK_MS, 33);
+  assert.equal(ANIMATION_PREVIEW_TICK_MS, 40);
+  assert.equal(ANIMATION_FRAME_TIME_SCALE, 0.65);
+  for (const animation of WORKING_ANIMATIONS) {
+    const durations = getAnimationDefinition(animation).frames.map((frame) => frame.duration);
+    assert.ok(Math.max(...durations) <= 124, `${animation} retained a ${Math.max(...durations)}ms frame hold`);
+  }
 });
 
 test("all dedicated advanced sprites remain bounded in every lifecycle phase", () => {

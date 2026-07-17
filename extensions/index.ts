@@ -673,6 +673,11 @@ export interface AnimationDefinition {
 
 export type AnimationTier = "full" | "condensed" | "compact";
 
+/** Terminal-friendly 30 FPS cadence with shorter frame holds to avoid visible stutter. */
+export const WORKING_ANIMATION_TICK_MS = 33;
+export const ANIMATION_PREVIEW_TICK_MS = 40;
+export const ANIMATION_FRAME_TIME_SCALE = 0.65;
+
 function spriteFrame(
   phase: AnimationPhase,
   duration: number,
@@ -686,7 +691,13 @@ function spriteFrame(
     { name: "spark", brightness: 120, glyphs: "·✧✦*⋆♨▲" },
   ],
 ): AnimationFrame {
-  return { phase, duration: Math.max(1, duration), lines, semantic, layers };
+  return {
+    phase,
+    duration: Math.max(1, Math.round(duration * ANIMATION_FRAME_TIME_SCALE)),
+    lines,
+    semantic,
+    layers,
+  };
 }
 
 const SPRITE_LAYERS = [
@@ -1302,7 +1313,7 @@ class WorkingAnimationWidget {
     if (this.timer || this.runtime.selected === "off") return;
     this.timer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* widget may be detached */ }
-    }, 50);
+    }, WORKING_ANIMATION_TICK_MS);
     this.timer.unref?.();
   }
 
@@ -1389,7 +1400,7 @@ export class AnimationPreviewMenu {
     this.selectedIndex = currentIndex >= 0 ? currentIndex : 0;
     this.timer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* submenu may be detached */ }
-    }, 80);
+    }, ANIMATION_PREVIEW_TICK_MS);
     this.timer.unref?.();
   }
 

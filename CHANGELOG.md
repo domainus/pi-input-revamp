@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Smoother animation pacing with a 30 FPS working-widget cadence, 25 FPS settings preview,
+  and shorter keyframe holds capped near 124 ms to eliminate visible input-settings stutter.
 - A typed advanced animation engine with variable frame durations, enter/idle/action/exit
   phases, theme-safe named color layers, and full/condensed/compact terminal tiers.
 - Live multi-line selected-row panels plus phase-aware advanced sprite art in every animation

@@ -168,7 +168,8 @@ aura, mecha, flame, invader, and triforce also have dedicated multi-line treatme
 remaining effects use a validated generic wrapper.
 
 The Working animation submenu now drives every row from the same advanced sprite engine and
-adds a full live panel for the selected row. Its repeating showcase visibly steps through
+adds a full live panel for the selected row. A 25 FPS preview cadence and shortened keyframe
+holds keep the richer terminal art responsive instead of visibly stuttering. Its repeating showcase visibly steps through
 `ENTER`, `IDLE`, `ACTION`, and `EXIT`, so the picker previews the actual phased art rather than
 the legacy one-line loop. `random` changes examples after each complete showcase (but resolves
 once per actual pi session), and `off` explicitly previews the hidden state.
