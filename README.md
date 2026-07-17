@@ -46,6 +46,7 @@ fall back to the defaults, and changes are picked up on the next pi restart.
     "bottomLeft": [],
     "bottomRight": ["turn", "turn-duration", "turn-cost", "turn-out", "turn-hit", "turn-miss"]
   },
+  "visibility": {},
   "animations": {
     "typingPulse": true,
     "submitFlash": true,
@@ -92,6 +93,11 @@ Every element is self-contained: the `session-*` variants always report
 whole-session totals and the `turn-*` variants always report the last completed
 turn, regardless of which quadrant you place them in.
 
+Run `/input-settings` to toggle every element currently present in these four
+quadrants—including extension slots such as `ext:codex-usage`. Visibility is
+stored separately from layout, so hiding an item never loses its quadrant or
+position; turning it back on restores it exactly where it was.
+
 ### Showing another extension in the bar
 
 Extensions can publish a status line through pi's `ctx.ui.setStatus(key, text)`
@@ -130,12 +136,18 @@ Each effect can be toggled independently under `animations`:
 | `submitFlash` | Brief white border pulse when you submit (text goes non-empty → empty) |
 | `metricPulse` | Metric text pulses toward white when its value changes                |
 | `tokPulse`    | The `~N tok` counter pulses each time the estimate updates            |
-| `working`     | Working indicator: `wave`, `orbit`, `scanner`, `bounce`, `sparkle`, `fairy`, or `random` |
+| `working`     | Working indicator: `wave`, `orbit`, `scanner`, `bounce`, `sparkle`, `fairy`, `triforce`, `speedster`, `invader`, `aura`, `ninja`, `flame`, `mecha`, `slime`, `random`, or `off` |
 
-Run `/input-settings` to change the working animation interactively. The choice is
-saved to `~/.pi/pi-input-revamp.json` and applies immediately. `random` chooses
-a fresh session-local animation once when each Pi session starts and remembers the
-last resolved choice so consecutive sessions do not repeat it.
+Run `/input-settings` to change the working animation and footer visibility
+interactively. Choices are saved to `~/.pi/pi-input-revamp.json` and apply
+immediately. `random` chooses a fresh session-local animation once when each Pi
+session starts and remembers the last resolved choice so consecutive sessions do
+not repeat it. `off` hides the working animation entirely.
+
+The working animation is an insertion-ordered `aboveEditor` widget rather than an
+editor row. Pi orders these widgets by registration time: to keep the animation
+above active legacy-subagent and dynamic-workflow boxes, list this package before
+`pi-interactive-subagents` in `settings.json` (the portable config does this).
 
 ## How it works
 

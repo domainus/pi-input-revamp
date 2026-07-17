@@ -10,9 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Selectable working animations: `wave`, `orbit`, `scanner`, `bounce`,
-  `sparkle`, and a fairy-companion animation.
-- `/input-settings` TUI for changing and persisting the working animation.
-- `random` working-animation mode, resolved once for every Pi session.
+  `sparkle`, `fairy`, `triforce`, `speedster`, `invader`, `aura`, `ninja`,
+  `flame`, `mecha`, and `slime`.
+- `/input-settings` searchable TUI for changing the animation or independently
+  showing/hiding every configured footer element without losing layout order.
+- `random` and `off` working-animation modes.
+- The working animation now renders above active subagent/workflow status boxes.
 
 ## [1.2.0] - 2026-06-30
 

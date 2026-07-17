@@ -37,7 +37,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 // ── Configuration types ──────────────────────────────────
 
-type BuiltinElementId =
+export type BuiltinElementId =
   | "agent" | "model" | "thinking-level" | "cwd"
   | "duration" | "tools" | "tok"
   | "session-label"
@@ -52,19 +52,24 @@ type BuiltinElementId =
  * published via `ctx.ui.setStatus(<statusKey>, …)`. Position is implied by the
  * quadrant the slot is placed in; no extra declaration is needed.
  */
-type ElementId = BuiltinElementId | `ext:${string}`;
+export type ElementId = BuiltinElementId | `ext:${string}`;
 
-const WORKING_ANIMATIONS = ["wave", "orbit", "scanner", "bounce", "sparkle", "fairy"] as const;
-type WorkingAnimation = typeof WORKING_ANIMATIONS[number];
-type WorkingAnimationChoice = WorkingAnimation | "random";
+export const WORKING_ANIMATIONS = [
+  "wave", "orbit", "scanner", "bounce", "sparkle", "fairy",
+  "triforce", "speedster", "invader", "aura", "ninja", "flame", "mecha", "slime",
+] as const;
+export type WorkingAnimation = typeof WORKING_ANIMATIONS[number];
+export type WorkingAnimationChoice = WorkingAnimation | "random" | "off";
 
-interface InputRevampConfig {
+export interface InputRevampConfig {
   layout: {
     topLeft: ElementId[];
     topRight: ElementId[];
     bottomLeft: ElementId[];
     bottomRight: ElementId[];
   };
+  /** Element visibility is deliberately separate from layout order. */
+  visibility: Record<string, boolean>;
   animations: {
     typingPulse: boolean;
     submitFlash: boolean;
@@ -83,6 +88,7 @@ const DEFAULT_CONFIG: InputRevampConfig = {
     bottomLeft: [],
     bottomRight: ["turn", "turn-duration", "turn-cost", "turn-out", "turn-hit", "turn-miss"],
   },
+  visibility: {},
   animations: {
     typingPulse: true,
     submitFlash: true,
@@ -97,7 +103,45 @@ function isWorkingAnimation(value: unknown): value is WorkingAnimation {
 }
 
 function isWorkingAnimationChoice(value: unknown): value is WorkingAnimationChoice {
-  return value === "random" || isWorkingAnimation(value);
+  return value === "random" || value === "off" || isWorkingAnimation(value);
+}
+
+function isBoolean(value: unknown): value is boolean {
+  return typeof value === "boolean";
+}
+
+/** Merge untrusted on-disk JSON with safe defaults without losing layout order. */
+export function mergeInputRevampConfig(parsed: unknown): InputRevampConfig {
+  const source = parsed && typeof parsed === "object" ? parsed as Partial<InputRevampConfig> : {};
+  const sourceLayout: Partial<InputRevampConfig["layout"]> = source.layout && typeof source.layout === "object" ? source.layout : {};
+  const sourceAnimations: Partial<InputRevampConfig["animations"]> = source.animations && typeof source.animations === "object" ? source.animations : {};
+  const visibility: Record<string, boolean> = {};
+  if (source.visibility && typeof source.visibility === "object") {
+    for (const [id, value] of Object.entries(source.visibility)) {
+      if (isBoolean(value)) visibility[id] = value;
+    }
+  }
+  const layout = (key: keyof InputRevampConfig["layout"]): ElementId[] => {
+    const value = sourceLayout[key];
+    return Array.isArray(value) ? value.filter((id): id is ElementId => typeof id === "string") : [...DEFAULT_CONFIG.layout[key]];
+  };
+  return {
+    layout: {
+      topLeft: layout("topLeft"),
+      topRight: layout("topRight"),
+      bottomLeft: layout("bottomLeft"),
+      bottomRight: layout("bottomRight"),
+    },
+    visibility,
+    animations: {
+      typingPulse: isBoolean(sourceAnimations.typingPulse) ? sourceAnimations.typingPulse : DEFAULT_CONFIG.animations.typingPulse,
+      submitFlash: isBoolean(sourceAnimations.submitFlash) ? sourceAnimations.submitFlash : DEFAULT_CONFIG.animations.submitFlash,
+      metricPulse: isBoolean(sourceAnimations.metricPulse) ? sourceAnimations.metricPulse : DEFAULT_CONFIG.animations.metricPulse,
+      tokPulse: isBoolean(sourceAnimations.tokPulse) ? sourceAnimations.tokPulse : DEFAULT_CONFIG.animations.tokPulse,
+      working: isWorkingAnimationChoice(sourceAnimations.working) ? sourceAnimations.working : DEFAULT_CONFIG.animations.working,
+      ...(isWorkingAnimation(sourceAnimations.lastWorking) ? { lastWorking: sourceAnimations.lastWorking } : {}),
+    },
+  };
 }
 
 function configPath(): string {
@@ -119,53 +163,14 @@ function loadConfig(): InputRevampConfig {
   try {
     const path = configPath();
     if (existsSync(path)) {
-      const raw = readFileSync(path, "utf8");
-      const parsed = JSON.parse(raw) as Partial<InputRevampConfig>;
-      // Merge with defaults so missing fields fall back
-      return {
-        layout: {
-          topLeft: Array.isArray(parsed.layout?.topLeft)
-            ? parsed.layout!.topLeft
-            : DEFAULT_CONFIG.layout.topLeft,
-          topRight: Array.isArray(parsed.layout?.topRight)
-            ? parsed.layout!.topRight
-            : DEFAULT_CONFIG.layout.topRight,
-          bottomLeft: Array.isArray(parsed.layout?.bottomLeft)
-            ? parsed.layout!.bottomLeft
-            : DEFAULT_CONFIG.layout.bottomLeft,
-          bottomRight: Array.isArray(parsed.layout?.bottomRight)
-            ? parsed.layout!.bottomRight
-            : DEFAULT_CONFIG.layout.bottomRight,
-        },
-        animations: {
-          typingPulse:
-            parsed.animations?.typingPulse ?? DEFAULT_CONFIG.animations.typingPulse,
-          submitFlash:
-            parsed.animations?.submitFlash ?? DEFAULT_CONFIG.animations.submitFlash,
-          metricPulse:
-            parsed.animations?.metricPulse ?? DEFAULT_CONFIG.animations.metricPulse,
-          tokPulse:
-            parsed.animations?.tokPulse ?? DEFAULT_CONFIG.animations.tokPulse,
-          working: isWorkingAnimationChoice(parsed.animations?.working)
-            ? parsed.animations.working
-            : DEFAULT_CONFIG.animations.working,
-          ...(isWorkingAnimation(parsed.animations?.lastWorking)
-            ? { lastWorking: parsed.animations.lastWorking }
-            : {}),
-        },
-      };
+      return mergeInputRevampConfig(JSON.parse(readFileSync(path, "utf8")));
     }
-
-    // File doesn't exist → create it with defaults, then return defaults
+    // File doesn't exist → create it with defaults, then return defaults.
     writeDefaultConfig(path);
   } catch {
-    // Silently fall back to defaults
+    // Silently fall back to defaults.
   }
-  return {
-    ...DEFAULT_CONFIG,
-    layout: { ...DEFAULT_CONFIG.layout },
-    animations: { ...DEFAULT_CONFIG.animations },
-  };
+  return mergeInputRevampConfig(undefined);
 }
 
 function saveConfig(config: InputRevampConfig): boolean {
@@ -179,7 +184,8 @@ function saveConfig(config: InputRevampConfig): boolean {
   }
 }
 
-function pickWorkingAnimation(choice: WorkingAnimationChoice, previous?: WorkingAnimation): WorkingAnimation {
+export function pickWorkingAnimation(choice: WorkingAnimationChoice, previous?: WorkingAnimation): WorkingAnimation {
+  if (choice === "off") return previous ?? DEFAULT_CONFIG.animations.working as WorkingAnimation;
   if (choice !== "random") return choice;
   const pool = previous && WORKING_ANIMATIONS.length > 1
     ? WORKING_ANIMATIONS.filter((animation) => animation !== previous)
@@ -702,22 +708,240 @@ export function renderWorkingAnimation(animation: WorkingAnimation, elapsed: num
     ].join("");
   }
 
+  const themedFrame = (frames: readonly string[], interval = 130): string => {
+    const frame = frames[Math.floor(elapsed / interval) % frames.length];
+    return Array.from(frame).map((glyph, index) => {
+      const centerDistance = Math.abs(index - (Array.from(frame).length - 1) / 2);
+      return c.shade(glyph, Math.round(80 - centerDistance * 22 + c.pulseOffset));
+    }).join("");
+  };
+
+  if (animation === "triforce") {
+    return themedFrame(["  ▲  ", " ▲▲  ", "▲ △ ▲", "  ▲▲ "]);
+  }
+  if (animation === "speedster") {
+    const width = 7;
+    const step = Math.floor(elapsed / 75) % width;
+    return Array.from({ length: width }, (_, index) => {
+      const distance = (step - index + width) % width;
+      const glyph = distance === 0 ? "●" : distance <= 2 ? "·" : " ";
+      return c.shade(glyph, distance === 0 ? 105 + c.pulseOffset : 45 - distance * 12);
+    }).join("");
+  }
+  if (animation === "invader") {
+    return themedFrame(["·▟█▙·", "·▜█▛·", "‹▟█▙›"], 150);
+  }
+  if (animation === "aura") {
+    return themedFrame(["‹(●)›", "«{◉}»", "‹[●]›"], 105);
+  }
+  if (animation === "ninja") {
+    return themedFrame(["·✦·✧·", "✧·✦·✧", "·✧·✦·"], 95);
+  }
+  if (animation === "flame") {
+    return themedFrame(["·♨●♨·", " ♨◉♨ ", "·♨◆♨·"], 140);
+  }
+  if (animation === "mecha") {
+    return themedFrame(["‹[●]›", "‹[◉]›", "‹[◆]›"], 115);
+  }
+  if (animation === "slime") {
+    return themedFrame(["·╭●╮·", " ╰●╯ ", "·╰◉╯·"], 150);
+  }
+
   const exhaustive: never = animation;
   return exhaustive;
 }
 
 // ── Custom editor ─────────────────────────────────────────
 
-interface AnimationRuntime {
+export interface AnimationRuntime {
   selected: WorkingAnimationChoice;
   resolved: WorkingAnimation;
+  startedAt: number;
+  expressionIndex: number;
+  expressionChangedAt: number;
 }
 
 interface EditorContext {
   pi: ExtensionAPI;
   ctx: Record<string, any>;
   config: InputRevampConfig;
-  animationRuntime: AnimationRuntime;
+}
+
+export function isElementVisible(visibility: Record<string, boolean> | undefined, id: string): boolean {
+  return visibility?.[id] !== false;
+}
+
+export function visibleElementIds(ids: readonly ElementId[], visibility: Record<string, boolean> | undefined): ElementId[] {
+  return ids.filter((id) => isElementVisible(visibility, id));
+}
+
+const ELEMENT_LABELS: Partial<Record<BuiltinElementId, string>> = {
+  agent: "Active agent",
+  model: "Model",
+  "thinking-level": "Reasoning level",
+  cwd: "Working directory",
+  duration: "Session duration",
+  tools: "Tool count",
+  tok: "Typed token estimate",
+  "session-label": "Session label",
+  "ctx-percent": "Context percentage",
+  "ctx-tokens": "Context tokens",
+  "ctx-tokens-max": "Context limit",
+  "ctx-tokens-full": "Context usage / limit",
+  "session-cost": "Session cost",
+  "session-out": "Session output tokens",
+  "session-hit": "Session cache hits",
+  "session-miss": "Session cache misses",
+  "turn-cost": "Turn cost",
+  "turn-out": "Turn output tokens",
+  "turn-hit": "Turn cache hits",
+  "turn-miss": "Turn cache misses",
+  turn: "Turn number",
+  "turn-duration": "Turn duration",
+};
+
+function elementLabel(id: ElementId): string {
+  if (id === "ext:codex-usage") return "Codex usage";
+  if (id.startsWith("ext:")) return `Extension: ${id.slice(4)}`;
+  return ELEMENT_LABELS[id as BuiltinElementId] ?? id;
+}
+
+function configuredElementIds(config: InputRevampConfig): ElementId[] {
+  const layout = config.layout;
+  return [...new Set([...layout.topLeft, ...layout.topRight, ...layout.bottomLeft, ...layout.bottomRight])];
+}
+
+export const INPUT_SETTINGS_VISIBLE_ROWS = 8;
+
+export function buildInputSettingItems(config: InputRevampConfig, runtime: AnimationRuntime): SettingItem[] {
+  const visibilityItems: SettingItem[] = configuredElementIds(config).map((elementId) => ({
+    id: `visibility:${elementId}`,
+    label: elementLabel(elementId),
+    description: `Show or hide ${elementLabel(elementId).toLowerCase()} without changing its saved position.`,
+    currentValue: isElementVisible(config.visibility, elementId) ? "on" : "off",
+    values: ["on", "off"],
+  }));
+  return [{
+    id: "working-animation",
+    label: "Working animation",
+    description: "Animation above active subagent/workflow boxes. Random changes each Pi session; off hides it.",
+    currentValue: runtime.selected,
+    values: [...WORKING_ANIMATIONS, "random", "off"],
+  }, ...visibilityItems];
+}
+
+export function applyInputSettingValue(
+  config: InputRevampConfig,
+  runtime: AnimationRuntime,
+  id: string,
+  newValue: string,
+): boolean {
+  if (id === "working-animation") {
+    if (!isWorkingAnimationChoice(newValue)) return false;
+    runtime.selected = newValue;
+    runtime.resolved = pickWorkingAnimation(newValue, config.animations.lastWorking ?? runtime.resolved);
+    runtime.startedAt = 0;
+    config.animations.working = newValue;
+    if (newValue === "random") config.animations.lastWorking = runtime.resolved;
+    return true;
+  }
+  if (id.startsWith("visibility:") && (newValue === "on" || newValue === "off")) {
+    config.visibility[id.slice("visibility:".length)] = newValue === "on";
+    return true;
+  }
+  return false;
+}
+
+/** Render the insertion-ordered above-editor working widget. */
+export function renderWorkingWidgetLines(
+  runtime: AnimationRuntime,
+  idle: boolean,
+  toolName: string | null,
+  width: number,
+  accentAnsi: string,
+  now: number = Date.now(),
+): string[] {
+  if (idle || runtime.selected === "off" || width <= 0) return [];
+  if (runtime.startedAt <= 0) {
+    runtime.startedAt = now;
+    runtime.expressionIndex = -1;
+    runtime.expressionChangedAt = 0;
+  }
+
+  let expression = DEFAULT_TOOL_EXPRESSION;
+  if (!toolName) {
+    if (runtime.expressionIndex < 0 || now - runtime.expressionChangedAt >= 10_000) {
+      const previous = runtime.expressionIndex;
+      let next = Math.floor(Math.random() * THINKING_EXPRESSIONS.length);
+      if (THINKING_EXPRESSIONS.length > 1 && next === previous) {
+        next = (next + 1 + Math.floor(Math.random() * (THINKING_EXPRESSIONS.length - 1))) % THINKING_EXPRESSIONS.length;
+      }
+      runtime.expressionIndex = next;
+      runtime.expressionChangedAt = now;
+    }
+    expression = THINKING_EXPRESSIONS[runtime.expressionIndex];
+  }
+
+  const thinkOffset = Math.round(Math.sin(now / 120) * 75);
+  const glyphs = renderWorkingAnimation(runtime.resolved, now - runtime.startedAt, {
+    shade: (text, amount) => shadeFgAnsi(accentAnsi, amount, text),
+    pulseOffset: thinkOffset,
+  });
+  const line = truncateToWidth(` ${glyphs} ${shadeFgAnsi(accentAnsi, thinkOffset, expression)}`, width, "");
+  return [line + " ".repeat(Math.max(0, width - visibleWidth(line)))];
+}
+
+class WorkingAnimationWidget {
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private readonly tui: TUI;
+  private readonly runtime: AnimationRuntime;
+  private readonly ctx: { isIdle: () => boolean };
+  private readonly theme: { getFgAnsi: (key: any) => string };
+
+  constructor(
+    tui: TUI,
+    runtime: AnimationRuntime,
+    ctx: { isIdle: () => boolean },
+    theme: { getFgAnsi: (key: any) => string },
+  ) {
+    this.tui = tui;
+    this.runtime = runtime;
+    this.ctx = ctx;
+    this.theme = theme;
+  }
+
+  private start(): void {
+    if (this.timer || this.runtime.selected === "off") return;
+    this.runtime.startedAt = Date.now();
+    this.runtime.expressionIndex = -1;
+    this.runtime.expressionChangedAt = 0;
+    this.timer = setInterval(() => {
+      try { this.tui.requestRender(); } catch { /* widget may be detached */ }
+    }, 50);
+    this.timer.unref?.();
+  }
+
+  private stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    this.runtime.startedAt = 0;
+  }
+
+  render(width: number): string[] {
+    const idle = this.ctx.isIdle();
+    if (!idle && this.runtime.selected !== "off") this.start();
+    else this.stop();
+    return renderWorkingWidgetLines(
+      this.runtime,
+      idle,
+      activeToolName,
+      width,
+      this.theme.getFgAnsi("accent"),
+    );
+  }
+
+  invalidate(): void {}
+  dispose(): void { this.stop(); }
 }
 
 /** Read-only context passed to every element renderer. */
@@ -756,15 +980,10 @@ interface ElementRenderEnv {
 class NerismaInputEditor extends CustomEditor {
   private ext: EditorContext;
   private config: InputRevampConfig;
-  private _thinkingTimer: ReturnType<typeof setInterval> | undefined;
   private _inputTimer: ReturnType<typeof setInterval> | undefined;
   private _dynamicWorkflowTimer: ReturnType<typeof setInterval> | undefined;
   private _dynamicWorkflowStartedAt: number = 0;
-  private _wasThinking: boolean = false;
   private _wasPulsing: boolean = false;
-  private _animStart: number = 0;
-  private _thinkingExpressionIndex: number = -1;
-  private _thinkingExpressionChangedAt: number = 0;
   private _lastInputText: string = "";
   /** Recent typing events (timestamp + number of characters added) to estimate WPM. */
   private _keyEvents: { t: number; n: number }[] = [];
@@ -833,7 +1052,6 @@ class NerismaInputEditor extends CustomEditor {
   }
 
   dispose() {
-    this._stopThinkingAnimation();
     this._stopInputAnimation();
     this._stopMetricAnimation();
     this._stopSubmitAnimation();
@@ -867,23 +1085,6 @@ class NerismaInputEditor extends CustomEditor {
     if (this._statusTimer) {
       clearInterval(this._statusTimer);
       this._statusTimer = undefined;
-    }
-  }
-
-  private _startThinkingAnimation() {
-    if (this._thinkingTimer) return;
-    this._animStart = Date.now();
-    this._thinkingExpressionIndex = -1;
-    this._thinkingExpressionChangedAt = 0;
-    this._thinkingTimer = setInterval(() => {
-      try { this.tui.requestRender(); } catch { /* editor may be detached */ }
-    }, 50);
-  }
-
-  private _stopThinkingAnimation() {
-    if (this._thinkingTimer) {
-      clearInterval(this._thinkingTimer);
-      this._thinkingTimer = undefined;
     }
   }
 
@@ -1092,7 +1293,7 @@ class NerismaInputEditor extends CustomEditor {
     const parts: string[] = [];
     const sepDim = `${env.dimAnsi}${separator}\x1b[39m`;
 
-    for (const id of elementIds) {
+    for (const id of visibleElementIds(elementIds, this.config.visibility)) {
       const result = this._renderElement(id, env);
       if (!result) continue;
 
@@ -1126,16 +1327,6 @@ class NerismaInputEditor extends CustomEditor {
 
     const { pi, ctx } = this.ext;
     const thm = ctx.ui.theme;
-
-    // ── Border animation while thinking ────────────────
-    const isThinking = !ctx.isIdle();
-    if (isThinking && !this._wasThinking) {
-      this._startThinkingAnimation();
-    } else if (!isThinking && this._wasThinking) {
-      this._stopThinkingAnimation();
-      try { this.tui.requestRender(); } catch {}
-    }
-    this._wasThinking = isThinking;
 
     const now = Date.now();
     const accentAnsi = thm.getFgAnsi("accent");
@@ -1347,40 +1538,7 @@ class NerismaInputEditor extends CustomEditor {
       return intensity > 0.001 ? lerpToWhite(ansi, intensity, text) : `${ansi}${text}\x1b[39m`;
     };
 
-    // ── Thinking animation line ───────────────────────────
     const result: string[] = [];
-
-    if (isThinking) {
-      const elapsed = Date.now() - this._animStart;
-      let expression: string;
-      if (activeToolName) {
-        expression = DEFAULT_TOOL_EXPRESSION;
-      } else {
-        if (this._thinkingExpressionIndex < 0 || now - this._thinkingExpressionChangedAt >= 10_000) {
-          const previous = this._thinkingExpressionIndex;
-          let next = Math.floor(Math.random() * THINKING_EXPRESSIONS.length);
-          if (THINKING_EXPRESSIONS.length > 1 && next === previous) {
-            next = (next + 1 + Math.floor(Math.random() * (THINKING_EXPRESSIONS.length - 1)))
-              % THINKING_EXPRESSIONS.length;
-          }
-          this._thinkingExpressionIndex = next;
-          this._thinkingExpressionChangedAt = now;
-        }
-        expression = THINKING_EXPRESSIONS[this._thinkingExpressionIndex];
-      }
-      const thinkOffset = Math.round(Math.sin(now / 120) * 75);
-      const thinkColor = (s: string) => shadeFgAnsi(accentAnsi, thinkOffset, s);
-      const wordStr = ` ${thinkColor(expression)}`;
-      const glyphs = renderWorkingAnimation(this.ext.animationRuntime.resolved, elapsed, {
-        shade: (s, amount) => shadeFgAnsi(accentAnsi, amount, s),
-        pulseOffset: thinkOffset,
-      });
-      const animLine = truncateToWidth(` ${glyphs}${wordStr}`, Math.max(0, width), "");
-      const animWidth = visibleWidth(animLine);
-      const pad = Math.max(0, width - animWidth);
-      result.push(animLine + " ".repeat(pad));
-      result.push("");
-    }
 
     // ── Build quadrant texts ────────────────────────────
     const layout = this.config.layout;
@@ -1509,6 +1667,9 @@ export default function (pi: ExtensionAPI): void {
   const animationRuntime: AnimationRuntime = {
     selected: config.animations.working,
     resolved: pickWorkingAnimation(config.animations.working, config.animations.lastWorking),
+    startedAt: 0,
+    expressionIndex: -1,
+    expressionChangedAt: 0,
   };
 
   pi.registerCommand("input-settings", {
@@ -1521,31 +1682,19 @@ export default function (pi: ExtensionAPI): void {
 
       await ctx.ui.custom((_tui, theme, _keybindings, done) => {
         const container = new Container();
-        container.addChild(new Text(theme.fg("accent", theme.bold("Input Animation Settings")), 1, 1));
+        container.addChild(new Text(theme.fg("accent", theme.bold("Input & Footer Settings")), 1, 1));
 
-        const items: SettingItem[] = [{
-          id: "working-animation",
-          label: "Working animation",
-          description: "Animation shown while the agent works. Random chooses once at the start of every Pi session.",
-          currentValue: animationRuntime.selected,
-          values: [...WORKING_ANIMATIONS, "random"],
-        }];
+        const items = buildInputSettingItems(config, animationRuntime);
         const settingsList = new SettingsList(
           items,
-          6,
+          INPUT_SETTINGS_VISIBLE_ROWS,
           getSettingsListTheme(),
-          (_id, newValue) => {
-            if (!isWorkingAnimationChoice(newValue)) return;
-            animationRuntime.selected = newValue;
-            animationRuntime.resolved = pickWorkingAnimation(
-              newValue,
-              config.animations.lastWorking ?? animationRuntime.resolved,
-            );
-            config.animations.working = newValue;
-            if (newValue === "random") config.animations.lastWorking = animationRuntime.resolved;
-            if (!saveConfig(config)) ctx.ui.notify("Could not save input animation settings", "error");
+          (id, newValue) => {
+            if (!applyInputSettingValue(config, animationRuntime, id, newValue)) return;
+            if (!saveConfig(config)) ctx.ui.notify("Could not save input/footer settings", "error");
           },
           () => done(undefined),
+          { enableSearch: true },
         );
         container.addChild(settingsList);
 
@@ -1583,6 +1732,15 @@ export default function (pi: ExtensionAPI): void {
 
     ctx.ui.setWorkingVisible(false);
 
+    // Pi preserves insertion order for aboveEditor widgets. Keep this package
+    // before pi-interactive-subagents in settings.json so this session-start
+    // registration remains above its later subagent/workflow status widgets.
+    ctx.ui.setWidget(
+      "input-revamp-working",
+      (tui, theme) => new WorkingAnimationWidget(tui, animationRuntime, ctx, theme),
+      { placement: "aboveEditor" },
+    );
+
     // Footer fully hidden — but we capture its data provider, the only channel
     // exposing extension statuses (setStatus) to extension code. The `ext:<key>`
     // layout slots read it lazily at render time.
@@ -1595,7 +1753,7 @@ export default function (pi: ExtensionAPI): void {
     });
 
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      return new NerismaInputEditor(tui, theme, keybindings, { pi, ctx, config, animationRuntime });
+      return new NerismaInputEditor(tui, theme, keybindings, { pi, ctx, config });
     });
   });
 
