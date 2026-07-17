@@ -63,9 +63,21 @@ test("every working animation has stable terminal width across ANSI-colored fram
     const widths = new Set(frames.map(visibleWidth));
     assert.equal(widths.size, 1, `${animation} changed terminal width`);
     const width = [...widths][0];
-    assert.ok(width > 0 && width <= 7, `${animation} width ${width}`);
+    assert.ok(width > 0 && width <= 11, `${animation} width ${width}`);
     assert.ok(new Set(frames).size > 1, `${animation} did not animate`);
   }
+});
+
+test("slime animation visibly grows a face and squashes into a blob", () => {
+  const plain = (elapsed: number) => renderWorkingAnimation("slime", elapsed, {
+    shade: (text) => text,
+    pulseOffset: 0,
+  });
+  const frames = [0, 145, 290, 435, 580].map(plain);
+  assert.ok(frames.some((frame) => frame.includes("•ᴗ•")), "slime never formed a face");
+  assert.ok(frames.some((frame) => frame.includes("╭(•ᴗ•)╮")), "slime never formed a rounded body");
+  assert.ok(frames.some((frame) => frame.includes("╰──•ᴗ•──╯")), "slime never squashed");
+  assert.ok(frames.every((frame) => visibleWidth(frame) === 11));
 });
 
 test("config merging preserves layout while visibility and animation-off remain backward compatible", () => {
@@ -131,6 +143,20 @@ test("animation submenu renders live previews and returns the selected option", 
   );
   const first = menu.render(32);
   assert.ok(first.some((line) => line.includes("fairy")));
+  const slimeMenu = new AnimationPreviewMenu(
+    { requestRender() {} } as any,
+    {
+      fg: (_key: string, text: string) => text,
+      bold: (text: string) => text,
+      getFgAnsi: () => accent,
+    },
+    keybindings,
+    "slime",
+    () => {},
+  );
+  const narrowSlimeRow = slimeMenu.render(18).find((line) => line.includes("slime"));
+  assert.match(narrowSlimeRow ?? "", /slime.*•/, "narrow slime preview lost its visible core");
+  slimeMenu.dispose();
   assert.ok(first.every((line) => visibleWidth(line) <= 32));
   await new Promise((resolve) => setTimeout(resolve, 90));
   assert.ok(requestedRenders > 0);
@@ -215,6 +241,10 @@ test("working widget hides when idle/off and never exceeds its requested width",
     assert.equal(lines.length, 1);
     assert.equal(visibleWidth(lines[0]), width, `widget was not padded to width ${width}`);
     if (width >= 5) assert.match(lines[0], /\x1b\[39m/, "widget did not close its ANSI foreground styling");
+    if (width === 12) {
+      assert.match(lines[0], /doing/, "compact widget dropped the tool expression");
+      assert.match(lines[0], /[▁▂▃▄▅▆▇█]/, "compact widget dropped the animation");
+    }
   }
 });
 

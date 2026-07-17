@@ -717,34 +717,34 @@ export function renderWorkingAnimation(animation: WorkingAnimation, elapsed: num
   };
 
   if (animation === "triforce") {
-    return themedFrame(["  ▲  ", " ▲▲  ", "▲ △ ▲", "  ▲▲ "]);
+    return themedFrame(["     ▲     ", "    ▲ ▲    ", "   ▲   ▲   ", "  ▲ ▲ ▲ ▲  "], 145);
   }
   if (animation === "speedster") {
-    const width = 7;
-    const step = Math.floor(elapsed / 75) % width;
+    const width = 11;
+    const step = Math.floor(elapsed / 65) % width;
     return Array.from({ length: width }, (_, index) => {
       const distance = (step - index + width) % width;
-      const glyph = distance === 0 ? "●" : distance <= 2 ? "·" : " ";
-      return c.shade(glyph, distance === 0 ? 105 + c.pulseOffset : 45 - distance * 12);
+      const glyph = distance === 0 ? "◆" : distance === 1 ? "›" : distance === 2 ? "»" : distance <= 4 ? "·" : " ";
+      return c.shade(glyph, distance === 0 ? 115 + c.pulseOffset : 65 - distance * 14);
     }).join("");
   }
   if (animation === "invader") {
-    return themedFrame(["·▟█▙·", "·▜█▛·", "‹▟█▙›"], 150);
+    return themedFrame(["   ▟███▙   ", "  ▟█▄█▄█▙  ", " ▟██▀█▀██▙ ", "▗█▛ ▀█▀ ▜█▖"], 155);
   }
   if (animation === "aura") {
-    return themedFrame(["‹(●)›", "«{◉}»", "‹[●]›"], 105);
+    return themedFrame(["    ·●·    ", "   ‹(●)›   ", "  «{◉◉◉}»  ", " «‹{◆◆◆}›» "], 105);
   }
   if (animation === "ninja") {
-    return themedFrame(["·✦·✧·", "✧·✦·✧", "·✧·✦·"], 95);
+    return themedFrame(["·    ✦    ·", "  · ✧ ✦ ·  ", "✦ ·  ✧  · ✦", "  · ✦ ✧ ·  "], 90);
   }
   if (animation === "flame") {
-    return themedFrame(["·♨●♨·", " ♨◉♨ ", "·♨◆♨·"], 140);
+    return themedFrame(["    ·♨·    ", "   ‹♨●♨›   ", "  ‹♨(◉)♨›  ", " ‹♨{◆◆◆}♨› "], 125);
   }
   if (animation === "mecha") {
-    return themedFrame(["‹[●]›", "‹[◉]›", "‹[◆]›"], 115);
+    return themedFrame(["   [·─·]   ", "  ╾[●─●]╼  ", "  ╾[◉═◉]╼  ", " ╾═[◆─◆]═╼ "], 115);
   }
   if (animation === "slime") {
-    return themedFrame(["·╭●╮·", " ╰●╯ ", "·╰◉╯·"], 150);
+    return themedFrame(["     •     ", "   ╭───╮   ", "   ╭•ᴗ•╮   ", "  ╭(•ᴗ•)╮  ", " ╰──•ᴗ•──╯ "], 145);
   }
 
   const exhaustive: never = animation;
@@ -856,6 +856,50 @@ export function applyInputSettingValue(
   return false;
 }
 
+function sliceAnsiColumns(text: string, startColumn: number, maxWidth: number): string {
+  const endColumn = startColumn + maxWidth;
+  const ansiPattern = /\x1b\[[0-?]*[ -\/]*[@-~]/g;
+  let output = "";
+  let pendingAnsi = "";
+  let column = 0;
+  let offset = 0;
+  let started = false;
+
+  const consumeText = (segment: string): void => {
+    for (const glyph of Array.from(segment)) {
+      const glyphWidth = visibleWidth(glyph);
+      const glyphEnd = column + glyphWidth;
+      if (glyphEnd > startColumn && column < endColumn) {
+        if (!started) {
+          output += pendingAnsi;
+          started = true;
+        }
+        if (glyphEnd <= endColumn) output += glyph;
+      }
+      column = glyphEnd;
+    }
+  };
+
+  let match: RegExpExecArray | null;
+  while ((match = ansiPattern.exec(text))) {
+    consumeText(text.slice(offset, match.index));
+    if (column >= endColumn) break;
+    if (started) output += match[0];
+    else pendingAnsi += match[0];
+    offset = match.index + match[0].length;
+  }
+  if (column < endColumn) consumeText(text.slice(offset));
+  if (output.includes("\x1b[")) output += "\x1b[0m";
+  return output;
+}
+
+export function centerCropToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  const width = visibleWidth(text);
+  if (width <= maxWidth) return text;
+  return sliceAnsiColumns(text, Math.floor((width - maxWidth) / 2), maxWidth);
+}
+
 /** Render the insertion-ordered above-editor working widget. */
 export function renderWorkingWidgetLines(
   runtime: AnimationRuntime,
@@ -887,11 +931,17 @@ export function renderWorkingWidgetLines(
   }
 
   const thinkOffset = Math.round(Math.sin(now / 120) * 75);
-  const glyphs = renderWorkingAnimation(runtime.resolved, now - runtime.startedAt, {
+  const fullGlyphs = renderWorkingAnimation(runtime.resolved, now - runtime.startedAt, {
     shade: (text, amount) => shadeFgAnsi(accentAnsi, amount, text),
     pulseOffset: thinkOffset,
   });
-  const line = truncateToWidth(` ${glyphs} ${shadeFgAnsi(accentAnsi, thinkOffset, expression)}`, width, "");
+  const fullGlyphWidth = visibleWidth(fullGlyphs);
+  const glyphBudget = width >= 24 ? fullGlyphWidth : Math.max(1, Math.min(fullGlyphWidth, Math.floor(width / 3)));
+  const glyphs = centerCropToWidth(fullGlyphs, glyphBudget);
+  const separator = width > visibleWidth(glyphs) ? " " : "";
+  const expressionBudget = Math.max(0, width - visibleWidth(glyphs) - visibleWidth(separator));
+  const words = truncateToWidth(shadeFgAnsi(accentAnsi, thinkOffset, expression), expressionBudget, "");
+  const line = truncateToWidth(`${glyphs}${separator}${words}`, width, "");
   return [line + " ".repeat(Math.max(0, width - visibleWidth(line)))];
 }
 
@@ -994,11 +1044,10 @@ export class AnimationPreviewMenu {
       ? WORKING_ANIMATIONS[Math.floor(elapsed / 800) % WORKING_ANIMATIONS.length]
       : option;
     const pulseOffset = Math.round(Math.sin(elapsed / 120) * 50);
-    const frame = renderWorkingAnimation(resolved, elapsed, {
+    return renderWorkingAnimation(resolved, elapsed, {
       shade: (text, amount) => shadeFgAnsi(this.theme.getFgAnsi("accent"), amount, text),
       pulseOffset,
     });
-    return frame + " ".repeat(Math.max(0, 7 - visibleWidth(frame)));
   }
 
   render(width: number): string[] {
@@ -1014,9 +1063,14 @@ export class AnimationPreviewMenu {
       const option = ANIMATION_MENU_OPTIONS[index];
       const selected = index === this.selectedIndex;
       const prefix = selected ? this.theme.fg("accent", "› ") : "  ";
-      const name = option.padEnd(12, " ");
+      const prefixWidth = 2;
+      const nameWidth = width >= 28 ? 12 : Math.max(3, Math.min(8, Math.floor((width - prefixWidth - 1) * 0.4)));
+      const shortName = truncateToWidth(option, nameWidth, "");
+      const name = shortName + " ".repeat(Math.max(0, nameWidth - visibleWidth(shortName)));
       const styledName = selected ? this.theme.fg("accent", name) : this.theme.fg("text", name);
-      lines.push(truncateToWidth(`${prefix}${styledName} ${this.preview(option, elapsed)}`, width, ""));
+      const previewBudget = Math.max(0, width - prefixWidth - nameWidth - 1);
+      const preview = centerCropToWidth(this.preview(option, elapsed), previewBudget);
+      lines.push(truncateToWidth(`${prefix}${styledName}${previewBudget > 0 ? " " : ""}${preview}`, width, ""));
     }
     if (start > 0 || end < ANIMATION_MENU_OPTIONS.length) {
       lines.push(truncateToWidth(this.theme.fg("dim", `  (${this.selectedIndex + 1}/${ANIMATION_MENU_OPTIONS.length})`), width, ""));
