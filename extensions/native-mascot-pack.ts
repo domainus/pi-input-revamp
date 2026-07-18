@@ -226,8 +226,15 @@ export type NativeMascotPack = NormalizedMascotPack;
 
 export interface NativeWorkingIndicator {
   readonly frames: readonly string[];
-  readonly intervalMs: number;
+  /** Omitted for a reduced-motion/static indicator so Pi does not start a timer. */
+  readonly intervalMs?: number;
 }
+
+/** Separate, stricter bounds for the combined mascot + working text line. */
+export const NATIVE_INDICATOR_MAX_WIDTH = 80;
+export const NATIVE_INDICATOR_MAX_BYTES = 768;
+export const NATIVE_INDICATOR_MAX_SGR = 12;
+const NATIVE_INDICATOR_MAX_TEXT_BYTES = 320;
 
 function safeThemeAnsi(value: unknown): string {
   if (typeof value !== "string" || value.length > 128) return "";
@@ -259,14 +266,133 @@ export function nativeWorkingIndicator(
   const sourceFrames = useNarrow ? [variant.narrowFallback] : reducedMotion ? [variant.reducedMotionFrame] : variant.frames;
   return {
     frames: sourceFrames.map((frame) => styleNativeFrame(frame, safeThemeAnsi(accentAnsi))),
-    intervalMs: reducedMotion ? 1_000_000 : variant.intervalMs,
+    ...(reducedMotion ? {} : { intervalMs: variant.intervalMs }),
+  };
+}
+
+const ANSI_SEQUENCE = /\x1b\][\s\S]*?(?:\x07|\x1b\\|$)|\x1b\[[0-?]*[ -\/]*[@-~]/gu;
+const NATIVE_TEXT_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu;
+
+/** Remove terminal controls from event-supplied working text. */
+export function sanitizeNativeWorkingText(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.replace(ANSI_SEQUENCE, "").replace(NATIVE_TEXT_CONTROLS, "");
+}
+
+const NativeSegmenter = (Intl as unknown as { Segmenter?: new (locales?: string | string[], options?: { granularity: string }) => { segment(value: string): Iterable<{ segment: string }> } }).Segmenter;
+const nativeGraphemeSegmenter = NativeSegmenter ? new NativeSegmenter(undefined, { granularity: "grapheme" }) : undefined;
+
+function nativeTextGraphemes(value: string): string[] {
+  return nativeGraphemeSegmenter
+    ? Array.from(nativeGraphemeSegmenter.segment(value), (part) => part.segment)
+    : Array.from(value);
+}
+
+function truncateNativeText(value: string, maxWidth: number, maxBytes = NATIVE_INDICATOR_MAX_TEXT_BYTES): string {
+  if (maxWidth <= 0 || maxBytes <= 0) return "";
+  let width = 0;
+  let usedBytes = 0;
+  let output = "";
+  for (const glyph of nativeTextGraphemes(value)) {
+    const glyphWidth = visibleWidth(glyph);
+    const glyphBytes = Buffer.byteLength(glyph, "utf8");
+    if (width + glyphWidth > maxWidth || usedBytes + glyphBytes > maxBytes) break;
+    output += glyph;
+    width += glyphWidth;
+    usedBytes += glyphBytes;
+  }
+  return output;
+}
+
+function parseAccent(value: string): { mode: "truecolor" | "256"; rgb?: [number, number, number]; index?: number } | undefined {
+  const safe = safeThemeAnsi(value);
+  const rgb = safe.match(/^\x1b\[38;2;(\d+);(\d+);(\d+)m$/u);
+  if (rgb) return { mode: "truecolor", rgb: [+rgb[1]!, +rgb[2]!, +rgb[3]!] };
+  const indexed = safe.match(/^\x1b\[38;5;(\d+)m$/u);
+  if (indexed) return { mode: "256", index: +indexed[1]! };
+  return undefined;
+}
+
+function nativeBandAnsi(accent: string, pulse: number): string {
+  const parsed = parseAccent(accent);
+  if (parsed?.mode === "truecolor" && parsed.rgb) {
+    const amount = Math.round(pulse);
+    const rgb = parsed.rgb.map((channel) => Math.max(0, Math.min(255, channel + amount)));
+    return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
+  }
+  if (parsed?.mode === "256" && parsed.index !== undefined) {
+    // A small, deterministic 256-colour pulse avoids per-grapheme transitions.
+    const index = Math.max(0, Math.min(255, parsed.index + Math.round(pulse / 18)));
+    return `\x1b[38;5;${index}m`;
+  }
+  return pulse > 20 ? "\x1b[96m" : pulse < -10 ? "\x1b[36m" : "\x1b[37m";
+}
+
+function nativeTextBands(text: string): string[] {
+  const glyphs = nativeTextGraphemes(text);
+  if (glyphs.length === 0) return [];
+  const bands: string[] = [];
+  let cursor = 0;
+  while (cursor < glyphs.length && bands.length < 3) {
+    const remainingBands = 3 - bands.length;
+    const take = Math.ceil((glyphs.length - cursor) / remainingBands);
+    bands.push(glyphs.slice(cursor, cursor + take).join(""));
+    cursor += take;
+  }
+  return bands;
+}
+
+/**
+ * Compile a bounded one-line mascot plus phrase for Pi's native indicator.
+ * Mascot pack limits remain independent; event text is sanitized and bounded
+ * only by this combined-line compiler. Text is split into at most three
+ * contiguous style bands, and each frame is complete/reset-safe.
+ */
+export function compileNativeWorkingIndicatorText(
+  pack: NormalizedMascotPack,
+  phrase: string,
+  accentAnsi?: string,
+  state: MascotVariantState = "thinking",
+  reducedMotion = false,
+): NativeWorkingIndicator {
+  const mascot = nativeWorkingIndicator(pack, undefined, state, reducedMotion);
+  const safePhrase = truncateNativeText(
+    sanitizeNativeWorkingText(phrase),
+    Math.max(0, NATIVE_INDICATOR_MAX_WIDTH - pack.fixedWidth - 1),
+  );
+  const bands = nativeTextBands(safePhrase);
+  const sourceFrames = mascot.frames;
+  const frames = sourceFrames.map((plainMascot, frameIndex) => {
+    const mascotRun = accentAnsi && safeThemeAnsi(accentAnsi)
+      ? `${safeThemeAnsi(accentAnsi)}${plainMascot}\x1b[39m`
+      : plainMascot;
+    if (!safePhrase) return mascotRun;
+    const text = bands.map((band, bandIndex) => {
+      const pulse = bands.length === 1
+        ? [0, 55, -15, 30][frameIndex % 4]!
+        : bandIndex === frameIndex % bands.length ? 55 : bandIndex === (frameIndex + 1) % bands.length ? 15 : -15;
+      return `${nativeBandAnsi(accentAnsi ?? "", pulse)}${band}\x1b[39m`;
+    }).join("");
+    const result = `${mascotRun} ${text}`;
+    // These assertions are deliberately fail-closed: a future style change
+    // must not let native output escape its one-line contract.
+    if (visibleWidth(result) > NATIVE_INDICATOR_MAX_WIDTH
+      || Buffer.byteLength(result, "utf8") > NATIVE_INDICATOR_MAX_BYTES
+      || (result.match(/\x1b\[/g) ?? []).length > NATIVE_INDICATOR_MAX_SGR) {
+      return `${plainMascot} ${safePhrase}`;
+    }
+    return result;
+  });
+  return {
+    frames,
+    ...(mascot.intervalMs === undefined ? {} : { intervalMs: mascot.intervalMs }),
   };
 }
 
 export function nativeMascotFrameAt(pack: NormalizedMascotPack, elapsedMs: number, state: MascotVariantState = "thinking", reducedMotion = false): string {
   const indicator = nativeWorkingIndicator(pack, undefined, state, reducedMotion);
   if (indicator.frames.length <= 1) return indicator.frames[0] ?? pack.staticFrame;
-  const index = Math.floor(Math.max(0, elapsedMs) / indicator.intervalMs) % indicator.frames.length;
+  const index = Math.floor(Math.max(0, elapsedMs) / (indicator.intervalMs ?? 1_000_000)) % indicator.frames.length;
   return indicator.frames[index] ?? indicator.frames[0]!;
 }
 

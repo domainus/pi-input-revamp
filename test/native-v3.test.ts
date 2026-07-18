@@ -10,6 +10,12 @@ import installInputRevamp, {
   getNativeMascotPack,
   mergeInputRevampConfig,
   nativeWorkingIndicator,
+  compileNativeWorkingIndicatorText,
+  NATIVE_INDICATOR_MAX_BYTES,
+  NATIVE_INDICATOR_MAX_SGR,
+  NATIVE_INDICATOR_MAX_WIDTH,
+  DEFAULT_TOOL_EXPRESSION,
+  THINKING_EXPRESSIONS,
   normalizeMascotPack,
   loadMascotPackFile,
   AnimationPreviewMenu,
@@ -34,6 +40,51 @@ test("native catalog is declarative, fixed-width, intrinsic, and bounded", () =>
   const slime = getNativeMascotPack("slime");
   assert.match(slime.name, /fan-art inspired/i);
   assert.ok(slime.frames.every((frame) => /[●•].*ᴗ.*[●•]/u.test(frame)));
+});
+
+test("native-v3 retains the original working phrase catalog", () => {
+  assert.equal(DEFAULT_TOOL_EXPRESSION, "doing something complex...");
+  assert.deepEqual(THINKING_EXPRESSIONS, [
+    "thinking hard...", "pondering...", "cranking its neurons...", "cooking up an answer...",
+    "crunching numbers...", "stirring its circuits...", "shuffling tokens...", "connecting the dots...",
+    "untangling the logic...", "assembling the pieces...", "chasing down the details...", "mapping the possibilities...",
+    "checking every angle...", "warming up the synapses...", "polishing the response...", "consulting the silicon oracle...",
+    "following the signal...", "sorting through the noise...", "lining up the answer...", "giving it one more thought...",
+    "consulting a rubber duck...", "turning it off and on again...", "blaming the cache...", "checking if it's DNS...",
+    "bribing the compiler...", "herding semicolons...", "feeding the token gremlins...", "shaking the magic 8-ball...",
+    "making the bugs nervous...", "convincing electrons to cooperate...", "pretending this is deterministic...",
+    "adding one more abstraction...", "recalculating the vibes...", "definitely not overthinking...",
+  ]);
+});
+
+test("combined native mascot and text effects stay within terminal-output budgets", () => {
+  const longestPhrase = [...THINKING_EXPRESSIONS].sort((a, b) => visibleWidth(b) - visibleWidth(a))[0]!;
+  for (const pack of NATIVE_MASCOT_PACKS) {
+    const indicator = compileNativeWorkingIndicatorText(pack, longestPhrase, accent);
+    assert.ok(indicator.frames.length > 0);
+    assert.equal(new Set(indicator.frames.map(visibleWidth)).size, 1, `${pack.id} changed line width`);
+    for (const frame of indicator.frames) {
+      assert.ok(visibleWidth(frame) <= NATIVE_INDICATOR_MAX_WIDTH, `${pack.id} exceeded width`);
+      assert.ok(Buffer.byteLength(frame) <= NATIVE_INDICATOR_MAX_BYTES, `${pack.id} exceeded bytes`);
+      assert.ok((frame.match(/\x1b\[/g) ?? []).length <= NATIVE_INDICATOR_MAX_SGR, `${pack.id} exceeded SGR budget`);
+      const plain = stripAnsi(frame);
+      assert.ok(plain.includes(longestPhrase), `${pack.id} lost the original phrase`);
+      assert.doesNotMatch(plain, /\x1b|[\x00-\x1f\x7f-\x9f]/u);
+    }
+  }
+  const hostile = compileNativeWorkingIndicatorText(
+    getNativeMascotPack("slime"),
+    "read\x1b]52;c;secret\x07\x1b[31m 👨‍👩‍👧‍👦 e\u0301",
+    accent,
+  );
+  assert.ok(hostile.frames.every((frame) => !stripAnsi(frame).includes("secret")));
+  assert.ok(hostile.frames.every((frame) => stripAnsi(frame).includes("👨‍👩‍👧‍👦 e\u0301")));
+  for (const adversarial of ["e" + "\u0301".repeat(1000), "\u200b".repeat(1000)]) {
+    const bounded = compileNativeWorkingIndicatorText(getNativeMascotPack("slime"), adversarial, accent);
+    assert.ok(bounded.frames.every((frame) => Buffer.byteLength(frame) <= NATIVE_INDICATOR_MAX_BYTES));
+    assert.ok(bounded.frames.every((frame) => visibleWidth(frame) <= NATIVE_INDICATOR_MAX_WIDTH));
+    assert.ok(bounded.frames.every((frame) => !frame.includes("\uFFFD")));
+  }
 });
 
 test("native pack validation fails closed for control and ANSI injection", () => {
@@ -160,14 +211,21 @@ test("native-v3 lifecycle delegates indicator ownership to Pi and updates messag
     assert.ok(indicators.at(-1).frames.length > 1);
     assert.ok(calls.includes("visible:true"));
     assert.equal(calls.includes("widget"), false, "native-v3 must not register the custom working widget");
+    const initialThinkingFrame = stripAnsi(indicators.at(-1).frames[0]);
+    handlers.get("turn_start")?.[0]?.({}, ctx);
+    assert.notEqual(stripAnsi(indicators.at(-1).frames[0]), initialThinkingFrame, "turn boundary did not rotate the original phrase");
     handlers.get("tool_execution_start")?.[0]?.({ toolCallId: "a", toolName: "shell\u001b[31m" }, ctx);
-    assert.ok(calls.includes("message:Using shell…"));
+    assert.equal(calls.filter((call) => call.startsWith("message:")).at(-1), "message:", "native frames own the phrase instead of Pi's separate message");
+    assert.match(stripAnsi(indicators.at(-1).frames[0]), /doing something complex\.\.\./);
     handlers.get("tool_execution_start")?.[0]?.({ toolCallId: "b", toolName: "read" }, ctx);
     assert.equal(indicators.at(-1).intervalMs, getNativeMascotPack("slime").intervalMs);
+    assert.match(stripAnsi(indicators.at(-1).frames[0]), /read.*doing something complex\.\.\./);
+    const beforeOlderToolEnds = indicators.length;
     handlers.get("tool_execution_end")?.[0]?.({ toolCallId: "a" }, ctx);
-    assert.equal(calls.filter((call) => call.startsWith("message:")).at(-1), "message:Using read…", "finishing one parallel tool left native mode in thinking state");
+    assert.equal(indicators.length, beforeOlderToolEnds, "finishing an older parallel tool restarted the native indicator");
+    assert.match(stripAnsi(indicators.at(-1).frames[0]), /read.*doing something complex\.\.\./, "finishing one parallel tool left native mode in thinking state");
     handlers.get("tool_execution_end")?.[0]?.({ toolCallId: "b" }, ctx);
-    assert.equal(calls.filter((call) => call.startsWith("message:")).at(-1), "message:Working…");
+    assert.equal(calls.filter((call) => call.startsWith("message:")).at(-1), "message:");
     editorFactory?.({ requestRender() {} }, ctx.ui.theme, { matches: () => false });
   } finally {
     if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
@@ -185,9 +243,10 @@ test("native reduced motion supplies one static frame and no animated sequence",
       setWorkingIndicator: (value: any) => indicators.push(value),
       setWorkingVisible() {},
     },
-  }, config, runtime);
+  }, config, runtime, "thinking", "thinking hard...");
   assert.equal(indicators.at(-1).frames.length, 1);
-  assert.equal(stripAnsi(indicators.at(-1).frames[0]), getNativeMascotPack("slime").reducedMotionFrame);
+  assert.equal(indicators.at(-1).intervalMs, undefined);
+  assert.ok(stripAnsi(indicators.at(-1).frames[0]).includes("thinking hard..."));
   const menu = new AnimationPreviewMenu(
     { requestRender() {} } as any,
     { fg: (_k: string, text: string) => text, bold: (text: string) => text, getFgAnsi: () => accent } as any,

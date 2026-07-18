@@ -131,7 +131,7 @@ beyond the `ext:<statusKey>` entry itself.
 
 Each effect can be toggled independently under `animations`:
 
-`engine` is `legacy` by default and keeps the restored renderer byte-compatible. Set it to `compiled-v2` to opt into the precompiled catalog and deadline scheduler, or to `native-v3` to delegate the active working indicator's lifecycle, timer, and frame diffing to Pi's documented `ctx.ui` API. `/input-settings` switches this safely at runtime. Compiled-v2 compiles complete ANSI frames once per animation, width, theme, label, and state key, centers stable geometry, merges adjacent duplicate phases, and uses a one-line fallback below 24 columns. Native-v3 instead supplies Pi intrinsic-width, one-line frames through `setWorkingIndicator({ frames, intervalMs })`; it never registers the above-editor working widget or constructs `CompiledAnimationEngine`. Tool messages are updated only at tool start/end events through `setWorkingMessage()`, never on a timer. Session metrics are recomputed only when the lifecycle snapshot changes in compiled-v2. To protect input latency, non-legacy modes disable the editor's legacy typing, submit, metric, token, and dynamic-workflow pulses. Roll back to `legacy` at any time to restore those effects.
+`engine` is `legacy` by default and keeps the restored renderer byte-compatible. Set it to `compiled-v2` to opt into the precompiled catalog and deadline scheduler, or to `native-v3` for a bounded native one-line mascot + text effect owned by Pi's documented `ctx.ui` API. `/input-settings` switches this safely at runtime. Compiled-v2 compiles complete ANSI frames once per animation, width, theme, label, and state key, centers stable geometry, merges adjacent duplicate phases, and uses a one-line fallback below 24 columns. Native-v3 precompiles the sanitized phrase into each native frame (at most three contiguous text bands plus one mascot run), changes thinking phrases only at session start and turn boundaries, and uses one Pi-owned frame timer; tool phrases change only at tool lifecycle events. The separate Pi working message stays empty to avoid duplication and is restored when leaving native-v3. Session metrics are recomputed only when the lifecycle snapshot changes in compiled-v2. To protect input latency, non-legacy modes disable the editor's legacy typing, submit, metric, token, and dynamic-workflow pulses. Roll back to `legacy` at any time to restore those effects.
 
 | Key           | Effect                                                                |
 | ------------- | --------------------------------------------------------------------- |
@@ -151,7 +151,7 @@ where every option animates live before you choose it. Choices are saved to
 session starts and remembers the last resolved choice so consecutive sessions do
 not repeat it. `off` hides the working animation entirely.
 
-Legacy and compiled-v2 use the compatibility `aboveEditor` widget, so list this package before `pi-interactive-subagents` when ordering matters. Native-v3 does not register that widget: Pi owns its native working-indicator lifecycle and renders only the pack's intrinsic-width line. `off` calls Pi's native visibility API and supplies no frames.
+Legacy and compiled-v2 use the compatibility `aboveEditor` widget, so list this package before `pi-interactive-subagents` when ordering matters. Native-v3 does not register that widget: Pi owns its native working-indicator lifecycle and renders one bounded mascot + phrase line. Settings previews may remain mascot-only to preserve their compact columns; they do not add a text preview timer. `off` calls Pi's native visibility API and supplies no frames.
 
 ### Native-v3 mascot packs
 
@@ -173,12 +173,12 @@ Optional local packs are loaded only from `~/.pi/pi-input-revamp-packs/` (or an 
 }
 ```
 
-Frames are normalized to one visible line and one fixed intrinsic width (at most 24 columns and 256 UTF-8 bytes). An explicit `narrowFallback` may use fewer columns and is selected by width-aware previews instead of center-cropping the normal pose. Pack text is plain data; the current theme contributes at most one compiler-owned foreground run per native frame. Preview rendering uses those same normalized frames and authored deadlines through one shared render gate. Do not use third-party branding or official names without permission; label fan-art/inspired packs and retain attribution.
+Frames are normalized to one visible line and one fixed intrinsic width (at most 24 columns and 256 UTF-8 bytes). An explicit `narrowFallback` may use fewer columns and is selected by width-aware previews instead of center-cropping the normal pose. Pack text is plain data; the current theme contributes at most one compiler-owned foreground run per mascot frame. Runtime native-v3 combines that mascot with sanitized event text in a separate ≤80-column/≤768-byte compiler, using at most three contiguous text style bands. Preview rendering uses the normalized mascot frames and authored deadlines; it may stay mascot-only. Do not use third-party branding or official names without permission; label fan-art/inspired packs and retain attribution.
 
 ### Performance and accessibility budgets
 
-- Native-v3 emits only a changed Pi-owned indicator frame; it has no extension scheduler, viewport padding, animated text effects, or duplicate working widget.
-- Every accepted frame is one line, ≤24 visible columns, ≤256 bytes, and ANSI/control-injection safe. A normal indicator has one bounded interval; `reducedMotion` supplies one static authored frame, so Pi starts no animation interval.
+- Native-v3 emits only changed Pi-owned indicator frames; it has no extension scheduler, viewport padding, duplicate working widget, or phrase timer. Its mascot + text effect is one line, ≤80 visible columns, ≤768 UTF-8 bytes, and ≤12 complete SGR sequences per frame.
+- Mascot pack frames remain one line, ≤24 visible columns, ≤256 bytes, and ANSI/control-injection safe. A normal native indicator has one bounded Pi-owned frame interval; `reducedMotion` supplies one static combined frame and no interval.
 - `off` disables the native indicator. Legacy and compiled-v2 remain explicit rollback paths.
 - `npm run benchmark` is a renderer microbenchmark only; cached frame reads do **not** measure total Pi TUI throughput. Tests enforce output-volume and frame-byte budgets separately.
 

@@ -50,6 +50,11 @@ import {
   loadMascotPackFile,
   nativeMascotFrameAt,
   nativeWorkingIndicator,
+  compileNativeWorkingIndicatorText,
+  sanitizeNativeWorkingText,
+  NATIVE_INDICATOR_MAX_WIDTH,
+  NATIVE_INDICATOR_MAX_BYTES,
+  NATIVE_INDICATOR_MAX_SGR,
   normalizeMascotPack,
   validateMascotPack,
   type MascotPackInput,
@@ -73,6 +78,11 @@ export {
   loadMascotPackFile,
   nativeMascotFrameAt,
   nativeWorkingIndicator,
+  compileNativeWorkingIndicatorText,
+  sanitizeNativeWorkingText,
+  NATIVE_INDICATOR_MAX_WIDTH,
+  NATIVE_INDICATOR_MAX_BYTES,
+  NATIVE_INDICATOR_MAX_SGR,
   normalizeMascotPack,
   validateMascotPack,
 };
@@ -314,11 +324,11 @@ function formatTokens(count: number): string {
 
 // ── "equalizer" animation (VU-meter-style bars ▁▂▃…█) ──────
 
-/** Default expression for any tool. */
-const DEFAULT_TOOL_EXPRESSION = "doing something complex...";
+/** Default expression for any tool. Kept byte-for-byte for legacy/compiled-v2. */
+export const DEFAULT_TOOL_EXPRESSION = "doing something complex...";
 
-/** Expressions during pure thinking (no tool). */
-const THINKING_EXPRESSIONS = [
+/** Expressions during pure thinking (no tool). Kept byte-for-byte for legacy/compiled-v2. */
+export const THINKING_EXPRESSIONS: readonly string[] = Object.freeze([
   "thinking hard...",
   "pondering...",
   "cranking its neurons...",
@@ -353,7 +363,7 @@ const THINKING_EXPRESSIONS = [
   "adding one more abstraction...",
   "recalculating the vibes...",
   "definitely not overthinking...",
-];
+]);
 
 /** Active tools keyed by call id; the editor displays the most recently started. */
 let activeToolName: string | null = null;
@@ -377,30 +387,45 @@ function nativePackFor(config: InputRevampConfig, animation: WorkingAnimation): 
 
 /** Apply only the native Pi working-indicator API; no widget or local timer. */
 export function applyNativeWorkingIndicator(
-  ctx: { ui?: { setWorkingIndicator?: (options?: any) => void; setWorkingVisible?: (visible: boolean) => void; theme?: { getFgAnsi?: (key: any) => string } } },
+  ctx: { ui?: { setWorkingIndicator?: (options?: any) => void; setWorkingVisible?: (visible: boolean) => void; setWorkingMessage?: (message?: string) => void; theme?: { getFgAnsi?: (key: any) => string } } },
   config: InputRevampConfig,
   runtime: AnimationRuntime,
   state: MascotVariantState = "thinking",
+  phrase?: string,
 ): void {
   if (!isNativeV3(config) || !ctx.ui) return;
   const active = runtime.selected !== "off";
   const pack = nativePackFor(config, runtime.resolved);
   const accent = ctx.ui.theme?.getFgAnsi?.("accent") ?? "";
-  const indicator = active ? nativeWorkingIndicator(pack, accent, state, config.animations.reducedMotion) : { frames: [] };
+  const indicator = active
+    ? phrase === undefined
+      ? nativeWorkingIndicator(pack, accent, state, config.animations.reducedMotion)
+      : compileNativeWorkingIndicatorText(pack, phrase, accent, state, config.animations.reducedMotion)
+    : { frames: [] };
   ctx.ui.setWorkingIndicator?.(indicator);
+  // Combined native frames own the phrase. Keep Pi's separate message empty so
+  // it cannot append a duplicate line; leaving native-v3 restores it below.
+  ctx.ui.setWorkingMessage?.("");
   ctx.ui.setWorkingVisible?.(active);
 }
 
-function updateNativeWorkingMessage(ctx: any, config: InputRevampConfig, message: string): void {
-  if (!isNativeV3(config) || typeof ctx?.ui?.setWorkingMessage !== "function") return;
-  // Tool names are event data, never pack/code input. Keep the native message
-  // plain and bounded so a hostile tool name cannot inject terminal controls.
-  const safe = message
-    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
-    .slice(0, 160);
-  ctx.ui.setWorkingMessage(safe);
+function nativeToolExpression(toolName: unknown): string {
+  const safeName = sanitizeNativeWorkingText(toolName).trim();
+  return safeName ? `${safeName} · ${DEFAULT_TOOL_EXPRESSION}` : DEFAULT_TOOL_EXPRESSION;
+}
+
+function chooseThinkingExpression(runtime: AnimationRuntime): string {
+  const previous = runtime.expressionIndex;
+  let next = Math.floor(Math.random() * THINKING_EXPRESSIONS.length);
+  if (THINKING_EXPRESSIONS.length > 1 && next === previous) next = (next + 1) % THINKING_EXPRESSIONS.length;
+  runtime.expressionIndex = next;
+  runtime.expressionChangedAt = Date.now();
+  return THINKING_EXPRESSIONS[next] ?? DEFAULT_TOOL_EXPRESSION;
+}
+
+function nativeThinkingExpression(runtime: AnimationRuntime, rotate = false): string {
+  if (rotate || runtime.expressionIndex < 0) return chooseThinkingExpression(runtime);
+  return THINKING_EXPRESSIONS[runtime.expressionIndex] ?? DEFAULT_TOOL_EXPRESSION;
 }
 
 /**
@@ -1349,7 +1374,7 @@ export class AnimationPreviewMenu {
     if (this.engineMode === "native-v3") {
       const pack = this.customMascotPack ?? getNativeMascotPack(resolved);
       const indicator = nativeWorkingIndicator(pack, this.theme.getFgAnsi("accent"), "thinking", this.reducedMotion, width);
-      const frame = Math.floor(Math.max(0, elapsed) / indicator.intervalMs) % Math.max(1, indicator.frames.length);
+      const frame = Math.floor(Math.max(0, elapsed) / (indicator.intervalMs ?? 1_000_000)) % Math.max(1, indicator.frames.length);
       return indicator.frames[frame] ?? pack.staticFrame;
     }
     if (this.engineMode === "compiled-v2") {
@@ -2305,7 +2330,10 @@ export default function (pi: ExtensionAPI): void {
           }
           if (latestSessionContext) {
             if (isNativeV3(config)) {
-              applyNativeWorkingIndicator(latestSessionContext, config, animationRuntime, activeToolName ? "tool" : "thinking");
+              const phrase = activeToolName
+                ? nativeToolExpression(activeToolName)
+                : nativeThinkingExpression(animationRuntime);
+              applyNativeWorkingIndicator(latestSessionContext, config, animationRuntime, activeToolName ? "tool" : "thinking", phrase);
               if (compatibilityWidgetRegistered) {
                 latestSessionContext.ui.setWidget?.("input-revamp-working", undefined);
                 compatibilityWidgetRegistered = false;
@@ -2353,8 +2381,8 @@ export default function (pi: ExtensionAPI): void {
     if (isNativeV3(config)) {
       // Native-v3 intentionally registers no above-editor widget and creates no
       // local scheduler. Pi owns visibility, cadence, diffing, and disposal.
-      ctx.ui.setWorkingMessage?.("Working…");
-      applyNativeWorkingIndicator(ctx, config, animationRuntime);
+      const phrase = nativeThinkingExpression(animationRuntime, true);
+      applyNativeWorkingIndicator(ctx, config, animationRuntime, "thinking", phrase);
     } else {
       ctx.ui.setWorkingVisible(false);
       ctx.ui.setWorkingIndicator?.();
@@ -2378,6 +2406,14 @@ export default function (pi: ExtensionAPI): void {
     });
   });
 
+  // Thinking text changes once per turn; Pi's native frame timer animates the
+  // already-compiled bands and never chooses phrases.
+  pi.on("turn_start", (_event, ctx) => {
+    if (!isNativeV3(config)) return;
+    const phrase = nativeThinkingExpression(animationRuntime, true);
+    applyNativeWorkingIndicator(ctx, config, animationRuntime, "thinking", phrase);
+  });
+
   // Final agent completion is the correctness boundary for session metrics. Refresh
   // once here rather than from every compiled animation render.
   pi.on("agent_end", () => {
@@ -2392,20 +2428,21 @@ export default function (pi: ExtensionAPI): void {
     const callId = typeof event.toolCallId === "string" ? event.toolCallId : `anonymous:${activeToolCalls.size}`;
     activeToolName = typeof event.toolName === "string" ? event.toolName : "tool";
     activeToolCalls.set(callId, activeToolName);
-    updateNativeWorkingMessage(ctx, config, `Using ${activeToolName}…`);
-    applyNativeWorkingIndicator(ctx, config, animationRuntime, "tool");
+    applyNativeWorkingIndicator(ctx, config, animationRuntime, "tool", nativeToolExpression(activeToolName));
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
+    const previousVisibleTool = activeToolName;
     if (typeof event.toolCallId === "string") activeToolCalls.delete(event.toolCallId);
     else activeToolCalls.clear();
     activeToolName = [...activeToolCalls.values()].at(-1) ?? null;
+    // Completing an older parallel call must not replace the same native
+    // indicator configuration and restart Pi's animation interval.
+    if (activeToolName === previousVisibleTool) return;
     if (activeToolName) {
-      updateNativeWorkingMessage(ctx, config, `Using ${activeToolName}…`);
-      applyNativeWorkingIndicator(ctx, config, animationRuntime, "tool");
+      applyNativeWorkingIndicator(ctx, config, animationRuntime, "tool", nativeToolExpression(activeToolName));
     } else {
-      updateNativeWorkingMessage(ctx, config, "Working…");
-      applyNativeWorkingIndicator(ctx, config, animationRuntime, "thinking");
+      applyNativeWorkingIndicator(ctx, config, animationRuntime, "thinking", nativeThinkingExpression(animationRuntime));
     }
   });
 }
