@@ -68,15 +68,15 @@ test("every working animation has stable terminal width across ANSI-colored fram
   }
 });
 
-test("slime animation keeps a cute round face while wobbling and squashing", () => {
+test("slime animation scans a shaded block-art dome, face, and base", () => {
   const plain = (elapsed: number) => renderWorkingAnimation("slime", elapsed, {
     shade: (text) => text,
     pulseOffset: 0,
   });
   const frames = [0, 155, 310, 465, 620, 775].map(plain);
-  assert.ok(frames.some((frame) => frame.includes("• ᴗ •")), "slime never formed its wide cute face");
-  assert.ok(frames.some((frame) => frame.includes("╭── •ᴗ• ──╮")), "slime never performed its elastic squash");
-  assert.ok(frames.some((frame) => frame.includes("╰ •ᴗ• ╯")), "slime never completed its wobble");
+  assert.ok(frames.some((frame) => frame.includes("▄████▄")), "slime never formed its rounded dome");
+  assert.ok(frames.some((frame) => frame.includes("●▒▒●")), "slime never revealed its block-art face");
+  assert.ok(frames.some((frame) => frame.includes("▀████▀")), "slime never completed its shaded base");
   assert.ok(frames.every((frame) => visibleWidth(frame) === 11));
 });
 
@@ -155,7 +155,7 @@ test("animation submenu renders live previews and returns the selected option", 
     () => {},
   );
   const narrowSlimeRow = slimeMenu.render(18).find((line) => line.includes("slime"));
-  assert.match(narrowSlimeRow ?? "", /slime.*•/, "narrow slime preview lost its visible core");
+  assert.match(narrowSlimeRow ?? "", /slime.*[▄█●]/, "narrow slime preview lost its visible core");
   slimeMenu.dispose();
   assert.ok(first.every((line) => visibleWidth(line) <= 32));
   await new Promise((resolve) => setTimeout(resolve, 90));
