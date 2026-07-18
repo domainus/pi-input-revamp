@@ -31,6 +31,21 @@ test("compiled catalog animates sanitized labels with distinct compile-time effe
   assert.equal(signatures.size, COMPILED_ANIMATION_IDS.length);
 });
 
+test("slime thinking text carries an obvious moving bright/dim goo highlight", () => {
+  const compiled = new AnimationCompiler().compile({
+    animation: "slime",
+    width: 80,
+    label: "consulting a rubber duck...",
+    stateKey: "thinking",
+    theme,
+  });
+  const labels = compiled.lines.map((frame) => frame.at(-1) ?? "");
+  assert.ok(labels.every((line) => line.includes("\x1b[1m")), "goo highlight never became bold");
+  assert.ok(labels.every((line) => line.includes("\x1b[2m")), "goo shadow never became dim");
+  assert.ok(new Set(labels).size > 1, "goo highlight did not move across the text");
+  assert.ok(labels.every((line) => stripAnsi(line).includes("consulting a rubber duck...")));
+});
+
 test("compact compiled labels preserve sprite motion, graphemes, and hostile-input bounds", () => {
   const compiler = new AnimationCompiler();
   const hostile = "safe\x1b]52;c;secret\x07\x1b[31m 👨‍👩‍👧‍👦 e\u0301";

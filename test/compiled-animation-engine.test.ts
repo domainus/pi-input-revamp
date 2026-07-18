@@ -200,6 +200,20 @@ test("compiled preview advances every visible row from one shared scheduler", as
   assert.equal(renders, stopped, "compiled preview scheduler survived disposal");
 });
 
+test("compiled input-settings preview keeps the slime's shaded face recognizable", () => {
+  const menu = new AnimationPreviewMenu(
+    { requestRender() {} } as any,
+    { fg: (_key: string, text: string) => text, bold: (text: string) => text, getFgAnsi: () => "\x1b[36m" } as any,
+    { matches: () => false } as any,
+    "slime",
+    () => {},
+    "compiled-v2",
+  );
+  const slimeRow = menu.render(44).find((line) => stripAnsi(line).includes("slime"));
+  assert.match(stripAnsi(slimeRow ?? ""), /slime.*[█▒].*●.*●/, "settings preview lost the block-art slime face");
+  menu.dispose();
+});
+
 test("scheduler skips full late cycles without redundant renders and avoids one-frame timers", () => {
   let now = 0;
   let id = 0;

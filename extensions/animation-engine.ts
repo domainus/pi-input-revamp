@@ -248,11 +248,15 @@ function textStyles(accent: string): TextStyle[] {
   const trueColor = accent.match(/^\x1b\[38;2;(\d+);(\d+);(\d+)m$/);
   if (trueColor) {
     const channels = trueColor.slice(1, 4).map((channel) => Math.max(0, Math.min(255, Number(channel))));
-    const variants = [-42, -20, 0, 28, 58].map((delta) => {
+    const variants = [-90, -45, 0, 45, 90].map((delta) => {
       const rgb = channels.map((channel) => Math.max(0, Math.min(255, channel + delta)));
       return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
     });
-    return [...new Set(variants)].map((open) => ({ open, close: RESET }));
+    return [...new Set(variants)].map((open, index, unique) => index === 0
+      ? { open: open + "\x1b[2m", close: "\x1b[22m" + RESET }
+      : index === unique.length - 1
+        ? { open: open + "\x1b[1m", close: "\x1b[22m" + RESET }
+        : { open, close: RESET });
   }
   const indexed = accent.match(/^\x1b\[38;5;(\d+)m$/);
   if (indexed) {
@@ -261,7 +265,11 @@ function textStyles(accent: string): TextStyle[] {
     // derived from the validated accent index, never from user-controlled text.
     const variants = [base - 36, base - 1, base, base + 1, base + 36]
       .map((index) => `\x1b[38;5;${Math.max(0, Math.min(255, index))}m`);
-    return [...new Set(variants)].map((open) => ({ open, close: RESET }));
+    return [...new Set(variants)].map((open, index, unique) => index === 0
+      ? { open: open + "\x1b[2m", close: "\x1b[22m" + RESET }
+      : index === unique.length - 1
+        ? { open: open + "\x1b[1m", close: "\x1b[22m" + RESET }
+        : { open, close: RESET });
   }
   // Basic SGR accents have no portable brightness channel; bold/dim are still
   // bounded styles while the final colour reset remains explicit.
@@ -290,7 +298,12 @@ function effectVariant(effect: CompiledTextEffect, index: number, count: number,
     case "shadow": return index === (phase % count) ? 4 : index < (phase % count) ? 1 : 2;
     case "flicker": return (index * 31 + phase * 13) % 5;
     case "segment": return Math.floor(index / 2 + phase) % 4;
-    case "goo": return Math.max(0, Math.min(4, 2 + ((index + phase) % 3) - Math.round(distance / Math.max(1, count / 4))));
+    case "goo": {
+      const cursor = phase % count;
+      const direct = Math.abs(index - cursor);
+      const wrapped = Math.min(direct, count - direct);
+      return wrapped === 0 ? 4 : wrapped <= 2 ? 3 : wrapped <= 4 ? 1 : 0;
+    }
   }
 }
 
@@ -305,19 +318,32 @@ function styleLabel(label: string, animation: CompiledAnimationId, phase: number
   // preventing parity/modulo aliasing while still traversing long labels.
   while (gcd(phaseStride, 60) !== 1 || gcd(phaseStride, clusters.length) !== 1) phaseStride++;
   const motionPhase = phase * phaseStride;
-  let bytes = 0;
-  let result = "";
-  // Append only complete styled graphemes. No width/byte limiter ever receives
-  // an ANSI stream that it could cut in the middle of an SGR sequence.
-  for (let index = 0; index < clusters.length; index++) {
+  const styledClusters = clusters.map((cluster, index) => {
     const fiveLevelVariant = effectVariant(effect, index, clusters.length, motionPhase);
     const styleIndex = styles.length === 1 ? 0 : Math.round((Math.max(0, Math.min(4, fiveLevelVariant)) / 4) * (styles.length - 1));
-    const style = styles[styleIndex] ?? styles[0];
-    const piece = `${style.open}${clusters[index]}${style.close}`;
-    const pieceBytes = ansiBytes(piece);
-    if (bytes + pieceBytes > maxBytes) break;
+    return { cluster, style: styles[styleIndex] ?? styles[0] };
+  });
+  let bytes = 0;
+  let result = "";
+  // Coalesce adjacent graphemes that share a style. The effect is still chosen
+  // per grapheme at compile time, but long thinking/tool labels no longer lose
+  // all animation by exceeding the frame budget through redundant SGR pairs.
+  for (let index = 0; index < styledClusters.length;) {
+    const style = styledClusters[index].style;
+    let text = "";
+    let cursor = index;
+    while (cursor < styledClusters.length && styledClusters[cursor].style.open === style.open && styledClusters[cursor].style.close === style.close) {
+      const candidate = text + styledClusters[cursor].cluster;
+      const piece = `${style.open}${candidate}${style.close}`;
+      if (bytes + ansiBytes(piece) > maxBytes) break;
+      text = candidate;
+      cursor++;
+    }
+    if (!text) break;
+    const piece = `${style.open}${text}${style.close}`;
     result += piece;
-    bytes += pieceBytes;
+    bytes += ansiBytes(piece);
+    index = cursor;
   }
   return result;
 }
@@ -329,7 +355,13 @@ function centerStyledLabel(label: string, width: number, animation: CompiledAnim
   return " ".repeat(left) + styleLabel(clipped, animation, phase, accent, totalPhases) + " ".repeat(Math.max(0, width - left - used));
 }
 
-function compactSprite(sprite: readonly string[], width: number): string {
+function compactSprite(sprite: readonly string[], width: number, animation: CompiledAnimationId): string {
+  // The settings picker has one row per option. Preserve the new slime's full
+  // shaded face there instead of flattening its dome/body into tiny fragments.
+  if (animation === "slime") {
+    const face = (sprite[1] ?? sprite[0] ?? "·").trim();
+    return truncateGraphemesToWidth(face, Math.max(1, Math.min(width, 15)));
+  }
   // Flatten the complete pose rather than selecting one row: some animations
   // keep their top row stable while lower rows move. Preserve leading position
   // but remove trailing padding before joining the rows.
@@ -371,7 +403,7 @@ function compileFrames(options: AnimationCompileOptions, stats?: AnimationCompil
       // remaining columns. Both projections are grapheme-safe.
       const labelReservation = label ? Math.min(visibleWidth(label), Math.floor(width / 2)) : 0;
       const spriteBudget = label ? Math.max(1, Math.min(15, width - labelReservation - 1)) : width;
-      const spritePart = truncateGraphemesToWidth(compactSprite(sprite, spriteBudget), spriteBudget);
+      const spritePart = truncateGraphemesToWidth(compactSprite(sprite, spriteBudget, options.animation), spriteBudget);
       const separator = label && visibleWidth(spritePart) < width ? " " : "";
       const labelBudget = Math.max(0, width - visibleWidth(spritePart) - visibleWidth(separator));
       const labelPart = truncateGraphemesToWidth(label, labelBudget);
