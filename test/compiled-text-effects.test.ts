@@ -20,7 +20,8 @@ test("compiled catalog animates sanitized labels with distinct compile-time effe
     const labelRows = compiled.lines.map((frame) => frame[frame.length - 1] ?? "");
     assert.ok(labelRows.every((row) => stripAnsi(row).includes(label)), animation);
     assert.ok(new Set(labelRows).size > 1, `${animation} label did not animate`);
-    assert.ok((labelRows[0].match(ANSI) ?? []).length >= 4, `${animation} did not style the label per grapheme`);
+    assert.ok((labelRows[0].match(ANSI) ?? []).length >= 3, `${animation} did not style the label in animated bands`);
+    assert.ok(labelRows.every((row) => (row.match(ANSI) ?? []).length <= 14), `${animation} exceeded the bounded SGR transition budget`);
     signatures.add(labelRows.join("\n"));
     for (const frame of compiled.lines) {
       assert.ok(frame.length <= 4);
@@ -57,6 +58,18 @@ test("compact compiled labels preserve sprite motion, graphemes, and hostile-inp
     const plain = compiled.lines.map((frame) => stripAnsi(frame[0] ?? "")).join(" ");
     assert.doesNotMatch(plain, /secret|\x1b\[31m/);
     assert.doesNotMatch(plain, /\uFFFD/);
+  }
+});
+
+test("long styled labels keep constant ANSI transition cost and never expose partial SGR", () => {
+  const compiler = new AnimationCompiler();
+  const longLabel = "making the bugs nervous and consulting a rubber duck ".repeat(8);
+  for (const animation of COMPILED_ANIMATION_IDS) {
+    const compiled = compiler.compile({ animation, width: 512, label: longLabel, stateKey: "long-runs", theme });
+    for (const frame of compiled.lines) {
+      const labelRow = frame.at(-1) ?? "";
+      assert.ok((labelRow.match(ANSI) ?? []).length <= 14, `${animation} emitted too many SGR transitions`);
+    }
   }
 });
 

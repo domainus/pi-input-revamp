@@ -44,7 +44,8 @@ test("compiled catalog is bounded, centered, reset-safe, and compact below 24 co
         theme: { accentAnsi: "\x1b[38;2;77;163;255m" },
       });
       assert.ok(frame.frameCount > 0);
-      if (width >= 24) assert.ok(frame.lines.some((lines) => lines.length >= 2), `${animation} lacks expressive multi-line wide frames`);
+      if (width >= 24 && animation !== "slime") assert.ok(frame.lines.some((lines) => lines.length >= 2), `${animation} lacks expressive multi-line wide frames`);
+      if (width >= 24 && animation === "slime") assert.ok(frame.lines.every((lines) => lines.length === 1), "slime should remain a tiny inline mascot");
       if (width >= 40) assert.ok(frame.lines.some((lines) => lines.some((line) => stripAnsi(line).includes("thinking hard..."))), `${animation} clipped the wide status label`);
       for (const lines of frame.lines) {
         assert.ok(lines.length <= 4);

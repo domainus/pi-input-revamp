@@ -147,18 +147,21 @@ const SPRITES: Record<CompiledAnimationId, readonly (readonly string[])[]> = {
     ["╾═[◆─◆]═╼", " ╾[◉]╼ ", "  ╰═╯  "],
   ],
   slime: [
-    // Compact adaptation of the shaded block slimes at textart.sh/topic/slime.
-    ["   ▄██▄   ", " ▄█▒●▒●▒█▄ ", "  ▀█▒ᴗ▒█▀  "],
-    ["  ▄████▄  ", "██▒●▒▒●▒██", " ▀██▒▒██▀ "],
-    ["   ▄██▄   ", " ▟█▒●▒●▒█▙ ", "  ▜█▒ᴗ▒█▛  "],
-    [" ▄██████▄ ", "█▒▒●▒▒●▒▒█", " ▀██▄▄██▀ "],
+    // Tiny complete mascot poses: a fluid squash/wobble inspired by the shaded
+    // block slimes at textart.sh/topic/slime, sized like a Claude-style spinner.
+    ["  ▄█●ᴗ●█▄  "],
+    [" ▟█▒●ᴗ●▒█▙ "],
+    ["██▒●▒ᴗ▒●▒██"],
+    [" ▜█▒●ᴗ●▒█▛ "],
+    ["  ▀█●ᴗ●█▀  "],
+    [" ▟█▒•ᴗ•▒█▙ "],
   ],
 };
 
 const FRAME_MS: Record<CompiledAnimationId, number> = {
   wave: 130, orbit: 110, scanner: 85, bounce: 100, sparkle: 120, fairy: 130,
   triforce: 145, speedster: 65, invader: 155, aura: 105, ninja: 90, flame: 125,
-  mecha: 115, slime: 155,
+  mecha: 115, slime: 110,
 };
 
 function ansiBytes(text: string): number {
@@ -302,7 +305,7 @@ function effectVariant(effect: CompiledTextEffect, index: number, count: number,
       const cursor = phase % count;
       const direct = Math.abs(index - cursor);
       const wrapped = Math.min(direct, count - direct);
-      return wrapped === 0 ? 4 : wrapped <= 2 ? 3 : wrapped <= 4 ? 1 : 0;
+      return wrapped === 0 ? 4 : 0;
     }
   }
 }
@@ -312,22 +315,24 @@ function styleLabel(label: string, animation: CompiledAnimationId, phase: number
   if (clusters.length === 0 || !accent) return limitUtf8(label, maxBytes);
   const styles = textStyles(accent);
   const effect = TEXT_EFFECTS[animation];
-  let phaseStride = Math.max(1, Math.ceil(clusters.length / Math.max(1, totalPhases)));
+  // Three contiguous bands are the hard terminal-throughput budget. Computing
+  // a style for every grapheme produced cached strings but still flooded the
+  // TUI with dozens of SGR transitions per frame, which was visibly laggy.
+  const bandCount = Math.min(3, clusters.length);
+  let phaseStride = Math.max(1, Math.ceil(bandCount / Math.max(1, totalPhases)));
   const gcd = (left: number, right: number): number => right === 0 ? left : gcd(right, left % right);
-  // Choose a stride coprime with the small 2/3/4/5 cycles used by the effects,
-  // preventing parity/modulo aliasing while still traversing long labels.
-  while (gcd(phaseStride, 60) !== 1 || gcd(phaseStride, clusters.length) !== 1) phaseStride++;
+  while (gcd(phaseStride, 60) !== 1 || gcd(phaseStride, bandCount) !== 1) phaseStride++;
   const motionPhase = phase * phaseStride;
   const styledClusters = clusters.map((cluster, index) => {
-    const fiveLevelVariant = effectVariant(effect, index, clusters.length, motionPhase);
+    const band = Math.min(bandCount - 1, Math.floor(index * bandCount / clusters.length));
+    const fiveLevelVariant = effectVariant(effect, band, bandCount, motionPhase);
     const styleIndex = styles.length === 1 ? 0 : Math.round((Math.max(0, Math.min(4, fiveLevelVariant)) / 4) * (styles.length - 1));
     return { cluster, style: styles[styleIndex] ?? styles[0] };
   });
   let bytes = 0;
   let result = "";
-  // Coalesce adjacent graphemes that share a style. The effect is still chosen
-  // per grapheme at compile time, but long thinking/tool labels no longer lose
-  // all animation by exceeding the frame budget through redundant SGR pairs.
+  // Coalesce each contiguous band into one compiler-owned ANSI run. Long
+  // thinking/tool labels therefore have a constant style-transition cost.
   for (let index = 0; index < styledClusters.length;) {
     const style = styledClusters[index].style;
     let text = "";
@@ -411,9 +416,16 @@ function compileFrames(options: AnimationCompileOptions, stats?: AnimationCompil
       labelLine = Boolean(labelPart);
     } else {
       phase = normalizeSprite(sprite, geometryWidth);
-      if (label) {
-        // Keep the label on the final row and let each animation's compiled
-        // text effect move across its grapheme clusters.
+      if (label && phase.length === 1) {
+        // Small mascot/spinner animations stay on one line with their status,
+        // matching Claude-style working indicators and minimizing TUI output.
+        const spritePart = phase[0].trim();
+        const labelBudget = Math.max(0, width - visibleWidth(spritePart) - 1);
+        const labelPart = truncateGraphemesToWidth(label, labelBudget);
+        phase = [`${spritePart}${labelPart ? " " : ""}${styleLabel(labelPart, options.animation, phaseIndex, accentAnsi, phaseSprites.length)}`];
+        labelLine = Boolean(labelPart);
+      } else if (label) {
+        // Multi-line catalog poses keep the animated status on the final row.
         const labelLineText = truncateGraphemesToWidth(label, Math.max(1, width - 2));
         const styled = centerStyledLabel(labelLineText, geometryWidth, options.animation, phaseIndex, accentAnsi, phaseSprites.length);
         if (phase.length < MAX_LINES) phase.push(styled);

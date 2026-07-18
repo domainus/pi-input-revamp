@@ -815,16 +815,16 @@ export function renderWorkingAnimation(animation: WorkingAnimation, elapsed: num
     return themedFrame(["   [·─·]   ", "  ╾[●─●]╼  ", "  ╾[◉═◉]╼  ", " ╾═[◆─◆]═╼ "], 115);
   }
   if (animation === "slime") {
-    // Shaded block-art cross-sections adapted from textart.sh/topic/slime.
-    // The legacy one-line renderer scans from dome to face to elastic base.
+    // Tiny complete mascot poses adapted from textart.sh/topic/slime. Every
+    // frame reads as one character while the silhouette fluidly squashes.
     return themedFrame([
-      "  ▄████▄   ",
-      " ▟█▒▒▒▒█▙  ",
-      "██▒●▒▒●▒██ ",
-      "██▒▒▒ᴗ▒▒██ ",
-      " ▜██████▛  ",
-      "  ▀████▀   ",
-    ], 155);
+      "  ▄█●ᴗ●█▄  ",
+      " ▟█▒●ᴗ●▒█▙ ",
+      "██▒●▒ᴗ▒●▒██",
+      " ▜█▒●ᴗ●▒█▛ ",
+      "  ▀█●ᴗ●█▀  ",
+      " ▟█▒•ᴗ•▒█▙ ",
+    ], 110);
   }
 
   const exhaustive: never = animation;
