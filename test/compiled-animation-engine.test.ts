@@ -19,6 +19,9 @@ import {
   CompiledAnimationScheduler,
 } from "../extensions/animation-engine.ts";
 
+const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const stripAnsi = (value: string): string => value.replace(ANSI, "");
+
 test("engine config defaults to legacy and settings switch modes", () => {
   const config = mergeInputRevampConfig({ animations: { engine: "compiled-v2" } });
   assert.equal(config.animations.engine, "compiled-v2");
@@ -42,7 +45,7 @@ test("compiled catalog is bounded, centered, reset-safe, and compact below 24 co
       });
       assert.ok(frame.frameCount > 0);
       if (width >= 24) assert.ok(frame.lines.some((lines) => lines.length >= 2), `${animation} lacks expressive multi-line wide frames`);
-      if (width >= 40) assert.ok(frame.lines.some((lines) => lines.some((line) => line.includes("thinking hard..."))), `${animation} clipped the wide status label`);
+      if (width >= 40) assert.ok(frame.lines.some((lines) => lines.some((line) => stripAnsi(line).includes("thinking hard..."))), `${animation} clipped the wide status label`);
       for (const lines of frame.lines) {
         assert.ok(lines.length <= 4);
         for (const line of lines) {

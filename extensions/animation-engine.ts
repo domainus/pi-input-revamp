@@ -48,13 +48,14 @@ const COMPACT_WIDTH = 24;
 /** Remove terminal controls and non-printing characters from external labels. */
 export function sanitizeAnimationLabel(value: unknown): string {
   if (typeof value !== "string") return "";
-  return value
+  const clean = value
     .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g, "")
     .replace(/\x1bP[\s\S]*?(?:\x1b\\|$)/g, "")
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]?/g, "")
     .replace(/\x1b[@-_]/g, "")
-    .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
-    .slice(0, 1024);
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+  // Keep the cache bounded without ever cutting a grapheme cluster in half.
+  return limitUtf8(clean, 768);
 }
 
 function normalizedWidth(value: number): number {
@@ -63,7 +64,14 @@ function normalizedWidth(value: number): number {
 }
 
 function safeThemeAnsi(value: unknown): string {
-  return typeof value === "string" && value.length <= 256 && /^\x1b\[[0-9;:]*m$/.test(value) ? value : "";
+  if (typeof value !== "string" || value.length > 256) return "";
+  const trueColor = value.match(/^\x1b\[38;2;(\d+);(\d+);(\d+)m$/);
+  if (trueColor && trueColor.slice(1).every((channel) => Number(channel) >= 0 && Number(channel) <= 255)) return value;
+  const indexed = value.match(/^\x1b\[38;5;(\d+)m$/);
+  if (indexed && Number(indexed[1]) <= 255) return value;
+  // Accept foreground only. Intensity and all other attributes are rejected;
+  // compiler-owned bold/dim variants are separately paired with 22m.
+  return /^\x1b\[(?:3[0-7]|9[0-7])m$/.test(value) ? value : "";
 }
 
 /** Declarative, fixed-geometry phases. Spaces are significant: they prevent jitter. */
@@ -164,19 +172,50 @@ function safeAnsi(ansi: string, text: string): string {
 
 function centerPlain(text: string, width: number): string {
   const w = visibleWidth(text);
-  if (w >= width) return truncateToWidth(text, width, "");
+  if (w >= width) return truncateGraphemesToWidth(text, width);
   const left = Math.floor((width - w) / 2);
   return " ".repeat(left) + text + " ".repeat(width - left - w);
+}
+
+const IntlSegmenter = (Intl as unknown as { Segmenter?: new (locales?: string | string[], options?: { granularity: string }) => { segment(value: string): Iterable<{ segment: string }> } }).Segmenter;
+const graphemeSegmenter = IntlSegmenter ? new IntlSegmenter(undefined, { granularity: "grapheme" }) : undefined;
+
+function graphemeClusters(text: string): string[] {
+  if (graphemeSegmenter) return Array.from(graphemeSegmenter.segment(text), (part) => part.segment);
+  const clusters: string[] = [];
+  for (const codePoint of Array.from(text)) {
+    const previous = clusters[clusters.length - 1];
+    const combining = /\p{M}/u.test(codePoint) || /[\uFE0E\uFE0F\u{E0100}-\u{E01EF}\u{1F3FB}-\u{1F3FF}]/u.test(codePoint);
+    const regional = /[\u{1F1E6}-\u{1F1FF}]/u.test(codePoint);
+    const previousRegional = previous && /^[\u{1F1E6}-\u{1F1FF}]$/u.test(previous);
+    if (previous && (combining || codePoint === "\u200d" || previous.endsWith("\u200d") || regional && previousRegional)) {
+      clusters[clusters.length - 1] = previous + codePoint;
+    } else clusters.push(codePoint);
+  }
+  return clusters;
 }
 
 function limitUtf8(text: string, maxBytes: number): string {
   let bytes = 0;
   let result = "";
-  for (const codePoint of text) {
-    const size = Buffer.byteLength(codePoint, "utf8");
+  for (const cluster of graphemeClusters(text)) {
+    const size = Buffer.byteLength(cluster, "utf8");
     if (bytes + size > Math.max(0, maxBytes)) break;
-    result += codePoint;
+    result += cluster;
     bytes += size;
+  }
+  return result;
+}
+
+function truncateGraphemesToWidth(text: string, width: number): string {
+  const budget = Math.max(0, Math.floor(width));
+  let used = 0;
+  let result = "";
+  for (const cluster of graphemeClusters(text)) {
+    const clusterWidth = visibleWidth(cluster);
+    if (used + clusterWidth > budget) break;
+    result += cluster;
+    used += clusterWidth;
   }
   return result;
 }
@@ -189,14 +228,123 @@ function boundedStyledLine(ansi: string, content: string, maxBytes: number): str
   return safeAnsi(ansi, limitUtf8(content, maxBytes - overhead));
 }
 
+type CompiledTextEffect = "ripple" | "orbit" | "scan" | "bounce" | "twinkle" | "flutter" | "triad" | "streak" | "pixel" | "glow" | "shadow" | "flicker" | "segment" | "goo";
+
+const TEXT_EFFECTS: Record<CompiledAnimationId, CompiledTextEffect> = {
+  wave: "ripple", orbit: "orbit", scanner: "scan", bounce: "bounce",
+  sparkle: "twinkle", fairy: "flutter", triforce: "triad", speedster: "streak",
+  invader: "pixel", aura: "glow", ninja: "shadow", flame: "flicker",
+  mecha: "segment", slime: "goo",
+};
+
+interface TextStyle {
+  readonly open: string;
+  readonly close: string;
+}
+
+function textStyles(accent: string): TextStyle[] {
+  if (!accent) return [{ open: "", close: "" }];
+  const trueColor = accent.match(/^\x1b\[38;2;(\d+);(\d+);(\d+)m$/);
+  if (trueColor) {
+    const channels = trueColor.slice(1, 4).map((channel) => Math.max(0, Math.min(255, Number(channel))));
+    const variants = [-42, -20, 0, 28, 58].map((delta) => {
+      const rgb = channels.map((channel) => Math.max(0, Math.min(255, channel + delta)));
+      return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
+    });
+    return [...new Set(variants)].map((open) => ({ open, close: RESET }));
+  }
+  const indexed = accent.match(/^\x1b\[38;5;(\d+)m$/);
+  if (indexed) {
+    const base = Math.max(0, Math.min(255, Number(indexed[1])));
+    // Stay in the same 256-colour mode. The small neighbouring palette is
+    // derived from the validated accent index, never from user-controlled text.
+    const variants = [base - 36, base - 1, base, base + 1, base + 36]
+      .map((index) => `\x1b[38;5;${Math.max(0, Math.min(255, index))}m`);
+    return [...new Set(variants)].map((open) => ({ open, close: RESET }));
+  }
+  // Basic SGR accents have no portable brightness channel; bold/dim are still
+  // bounded styles while the final colour reset remains explicit.
+  return [
+    { open: accent + "\x1b[2m", close: "\x1b[22m" + RESET },
+    { open: accent, close: RESET },
+    { open: accent + "\x1b[1m", close: "\x1b[22m" + RESET },
+  ];
+}
+
+function effectVariant(effect: CompiledTextEffect, index: number, count: number, phase: number): number {
+  if (count <= 1) return (phase + index) % 5;
+  const middle = (count - 1) / 2;
+  const distance = Math.abs(index - middle);
+  switch (effect) {
+    case "ripple": return Math.max(0, Math.min(4, phase - Math.round(distance) + 2));
+    case "orbit": return (phase + index * 2) % 5;
+    case "scan": return Math.abs(index - (phase % count)) <= 0 ? 4 : 0;
+    case "bounce": { const cursor = phase % (count * 2 - 2); const at = cursor < count ? cursor : count * 2 - 2 - cursor; return index === at ? 4 : 1; }
+    case "twinkle": return (index + phase) % 4 === 0 ? 4 : ((index + phase) % 2 ? 1 : 2);
+    case "flutter": return (index + phase) % 3 === 0 ? 4 : (index + phase) % 2;
+    case "triad": return (index + phase) % 3 === 0 ? 4 : ((index + phase) % 3) + 1;
+    case "streak": { const distanceBehind = (phase - index + count * 4) % count; return distanceBehind < 4 ? 4 - distanceBehind : 0; }
+    case "pixel": return ((index * 17 + phase * 7) ^ (index >> 1)) % 5;
+    case "glow": return Math.max(0, Math.min(4, 4 - Math.floor(distance / 2) + ((phase % 2) ? 0 : -1)));
+    case "shadow": return index === (phase % count) ? 4 : index < (phase % count) ? 1 : 2;
+    case "flicker": return (index * 31 + phase * 13) % 5;
+    case "segment": return Math.floor(index / 2 + phase) % 4;
+    case "goo": return Math.max(0, Math.min(4, 2 + ((index + phase) % 3) - Math.round(distance / Math.max(1, count / 4))));
+  }
+}
+
+function styleLabel(label: string, animation: CompiledAnimationId, phase: number, accent: string, totalPhases = 1, maxBytes = 1536): string {
+  const clusters = graphemeClusters(label);
+  if (clusters.length === 0 || !accent) return limitUtf8(label, maxBytes);
+  const styles = textStyles(accent);
+  const effect = TEXT_EFFECTS[animation];
+  let phaseStride = Math.max(1, Math.ceil(clusters.length / Math.max(1, totalPhases)));
+  const gcd = (left: number, right: number): number => right === 0 ? left : gcd(right, left % right);
+  // Choose a stride coprime with the small 2/3/4/5 cycles used by the effects,
+  // preventing parity/modulo aliasing while still traversing long labels.
+  while (gcd(phaseStride, 60) !== 1 || gcd(phaseStride, clusters.length) !== 1) phaseStride++;
+  const motionPhase = phase * phaseStride;
+  let bytes = 0;
+  let result = "";
+  // Append only complete styled graphemes. No width/byte limiter ever receives
+  // an ANSI stream that it could cut in the middle of an SGR sequence.
+  for (let index = 0; index < clusters.length; index++) {
+    const fiveLevelVariant = effectVariant(effect, index, clusters.length, motionPhase);
+    const styleIndex = styles.length === 1 ? 0 : Math.round((Math.max(0, Math.min(4, fiveLevelVariant)) / 4) * (styles.length - 1));
+    const style = styles[styleIndex] ?? styles[0];
+    const piece = `${style.open}${clusters[index]}${style.close}`;
+    const pieceBytes = ansiBytes(piece);
+    if (bytes + pieceBytes > maxBytes) break;
+    result += piece;
+    bytes += pieceBytes;
+  }
+  return result;
+}
+
+function centerStyledLabel(label: string, width: number, animation: CompiledAnimationId, phase: number, accent: string, totalPhases: number): string {
+  const clipped = truncateGraphemesToWidth(label, Math.max(0, width));
+  const used = visibleWidth(clipped);
+  const left = Math.floor(Math.max(0, width - used) / 2);
+  return " ".repeat(left) + styleLabel(clipped, animation, phase, accent, totalPhases) + " ".repeat(Math.max(0, width - left - used));
+}
+
 function compactSprite(sprite: readonly string[], width: number): string {
   // Flatten the complete pose rather than selecting one row: some animations
   // keep their top row stable while lower rows move. Preserve leading position
   // but remove trailing padding before joining the rows.
-  const core = sprite.map((line) => line.replace(/\s+$/u, "")).filter((line) => line.trim().length > 0).join(" ") || "·";
+  const rows = sprite.map((line) => line.replace(/\s+$/u, "")).filter((line) => line.trim().length > 0);
   const budget = Math.max(1, Math.min(width, 15));
-  const positioned = truncateToWidth(core, budget, "");
-  return positioned.trim().length > 0 ? positioned : truncateToWidth(core.trim(), budget, "");
+  // Give every visible source row a share of the compact projection. This is
+  // important for poses whose top row is static while the lower rows move.
+  const rowBudget = Math.max(1, Math.floor((budget - Math.max(0, rows.length - 1)) / Math.max(1, rows.length)));
+  const core = rows.map((row) => {
+    const clipped = truncateGraphemesToWidth(row, rowBudget);
+    // If leading pose padding consumed the whole slice, retain the row's
+    // grapheme payload rather than dropping that source row entirely.
+    return clipped.trim().length > 0 ? clipped : truncateGraphemesToWidth(row.trim(), rowBudget);
+  }).filter(Boolean).join(" ") || "·";
+  const positioned = truncateGraphemesToWidth(core, budget);
+  return positioned.trim().length > 0 ? positioned : truncateGraphemesToWidth(core.trim(), budget);
 }
 
 function normalizeSprite(sprite: readonly string[], geometryWidth: number): string[] {
@@ -206,7 +354,7 @@ function normalizeSprite(sprite: readonly string[], geometryWidth: number): stri
 
 function compileFrames(options: AnimationCompileOptions, stats?: AnimationCompilerStats): CompiledAnimation {
   const width = normalizedWidth(options.width);
-  const label = sanitizeAnimationLabel(options.label).trim();
+  const label = sanitizeAnimationLabel(options.label);
   const accentAnsi = safeThemeAnsi(options.theme.accentAnsi);
   const compact = width < COMPACT_WIDTH;
   const phaseSprites = SPRITES[options.animation];
@@ -214,22 +362,51 @@ function compileFrames(options: AnimationCompileOptions, stats?: AnimationCompil
   const geometryWidth = Math.min(width, Math.max(spriteWidth, label ? visibleWidth(label) : 0));
   const lines: string[][] = [];
 
-  for (const sprite of phaseSprites) {
-    const compactGlyphWidth = label
-      ? Math.max(1, Math.min(15, width, Math.floor(width / 3)))
-      : Math.max(1, Math.min(15, width));
-    const phase = compact
-      ? [truncateToWidth(`${compactSprite(sprite, compactGlyphWidth)}${label ? ` ${label}` : ""}`, width, "")]
-      : normalizeSprite(sprite, geometryWidth);
-    if (!compact && label) {
-      // Put the stable label on the final line, preserving the four-line bound.
-      const labelLine = truncateToWidth(label, Math.max(1, width - 2), "");
-      if (phase.length < MAX_LINES) phase.push(centerPlain(labelLine, geometryWidth));
-      else phase[phase.length - 1] = centerPlain(labelLine, geometryWidth);
+  phaseSprites.forEach((sprite, phaseIndex) => {
+    let phase: string[];
+    let labelLine = false;
+    if (compact) {
+      // Reserve a stable sprite budget first, then animate the label in the
+      // remaining columns. Both projections are grapheme-safe.
+      const labelReservation = label ? Math.min(visibleWidth(label), Math.floor(width / 2)) : 0;
+      const spriteBudget = label ? Math.max(1, Math.min(15, width - labelReservation - 1)) : width;
+      const spritePart = truncateGraphemesToWidth(compactSprite(sprite, spriteBudget), spriteBudget);
+      const separator = label && visibleWidth(spritePart) < width ? " " : "";
+      const labelBudget = Math.max(0, width - visibleWidth(spritePart) - visibleWidth(separator));
+      const labelPart = truncateGraphemesToWidth(label, labelBudget);
+      phase = [`${spritePart}${separator}${styleLabel(labelPart, options.animation, phaseIndex, accentAnsi, phaseSprites.length)}`];
+      labelLine = Boolean(labelPart);
+    } else {
+      phase = normalizeSprite(sprite, geometryWidth);
+      if (label) {
+        // Keep the label on the final row and let each animation's compiled
+        // text effect move across its grapheme clusters.
+        const labelLineText = truncateGraphemesToWidth(label, Math.max(1, width - 2));
+        const styled = centerStyledLabel(labelLineText, geometryWidth, options.animation, phaseIndex, accentAnsi, phaseSprites.length);
+        if (phase.length < MAX_LINES) phase.push(styled);
+        else phase[phase.length - 1] = styled;
+        labelLine = true;
+      }
     }
     const boundedPhase = phase.slice(0, MAX_LINES);
     const perLineBudget = Math.max(1, Math.floor((MAX_BYTES - Math.max(0, boundedPhase.length - 1)) / Math.max(1, boundedPhase.length)));
-    const bounded = boundedPhase.map((line) => {
+    const bounded = boundedPhase.map((line, lineIndex) => {
+      // Label rows are already complete ANSI-safe frames. Sprite rows receive a
+      // single accent wrapper; no styling or glyph work occurs after compile().
+      if (labelLine && lineIndex === boundedPhase.length - 1) {
+        // Never pass styled text to a grapheme or byte truncator. The plain
+        // label was width-clipped before styling; pad the complete ANSI stream
+        // using only its measured visible width.
+        const visible = visibleWidth(line);
+        const left = compact ? 0 : Math.floor(Math.max(0, width - visible) / 2);
+        const positioned = " ".repeat(left) + line + " ".repeat(Math.max(0, width - left - visible));
+        const content = positioned + RESET;
+        if (ansiBytes(content) <= perLineBudget) return content;
+        // If a maximal styled label exceeds its share, fall back before any
+        // truncation by stripping complete compiler-owned SGR sequences.
+        const plain = positioned.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+        return boundedStyledLine("", plain, perLineBudget);
+      }
       const content = centerPlain(line, width);
       return boundedStyledLine(accentAnsi, content, perLineBudget);
     });
@@ -237,7 +414,7 @@ function compileFrames(options: AnimationCompileOptions, stats?: AnimationCompil
     const previous = lines[lines.length - 1];
     // Adjacent duplicate phases waste timer work and are intentionally merged.
     if (!previous || previous.join("\n") !== bounded.join("\n")) lines.push(bounded);
-  }
+  });
 
   return {
     animation: options.animation,
@@ -428,7 +605,12 @@ export class CompiledAnimationEngine {
     this.theme = options.theme;
     this.state = { animation: options.animation, label: options.label ?? "", stateKey: options.stateKey ?? "" };
     this.scheduler = new CompiledAnimationScheduler({
-      requestRender: options.requestRender,
+      // Frame selection is synchronized when the scheduler advances. render()
+      // only returns the already-selected cached row.
+      requestRender: () => {
+        this.syncFrame(this.scheduler.currentFrame());
+        try { options.requestRender(); } catch { /* detached TUI */ }
+      },
       frameCount: () => this.compiled?.frameCount ?? 1,
       frameDuration: (frame) => this.compiled?.durations[frame] ?? 130,
       clock: options.clock,
@@ -454,20 +636,23 @@ export class CompiledAnimationEngine {
 
   prepare(width: number): void {
     if (this.disposed) return;
-    const normalized = Math.max(1, Math.floor(width));
+    const normalized = normalizedWidth(width);
     if (this.compiled && normalized === this.width) return;
     this.width = normalized;
     this.compiled = this.compiler.compile({ ...this.state, width: normalized, theme: this.theme });
     this.currentLines = this.compiled.lines[0] ?? [];
   }
 
-  setFrame(frame: number): void {
+  private syncFrame(frame: number): void {
     if (!this.compiled) return;
-    const next = this.compiled.lines[((frame % this.compiled.frameCount) + this.compiled.frameCount) % this.compiled.frameCount] ?? [];
-    this.currentLines = next;
+    this.currentLines = this.compiled.lines[((frame % this.compiled.frameCount) + this.compiled.frameCount) % this.compiled.frameCount] ?? [];
   }
 
-  start(width?: number): void { if (width !== undefined) this.prepare(width); this.scheduler.start(); }
+  start(width?: number): void {
+    if (width !== undefined) this.prepare(width);
+    this.scheduler.start();
+    this.syncFrame(this.scheduler.currentFrame());
+  }
   stop(): void { this.scheduler.stop(); }
   invalidate(): void {
     this.compiled = undefined;
@@ -479,8 +664,8 @@ export class CompiledAnimationEngine {
   render(width?: number): readonly string[] {
     if (width !== undefined && width !== this.width) this.prepare(width);
     this.compiler.stats.runtimeRenders++;
-    // Deliberately no width/glyph/ANSI/interpolation work occurs below.
-    this.setFrame(this.scheduler.currentFrame());
+    // Deliberately no frame selection, width/glyph/ANSI/interpolation work
+    // occurs below: the scheduler callback already selected currentLines.
     return this.currentLines;
   }
 

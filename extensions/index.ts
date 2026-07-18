@@ -1234,7 +1234,9 @@ export class AnimationPreviewMenu {
         // full-width multi-line frame and joining padded rows would crop away
         // most motion in the narrow preview column.
         width: Math.max(1, Math.min(width, 23)),
-        label: "",
+        // Preview the same compiled text-effect path used by the working widget;
+        // the option name is a stable, sanitized preview label.
+        label: option,
         stateKey: `preview:${option}`,
         theme: { accentAnsi: this.theme.getFgAnsi("accent") },
       });
