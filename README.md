@@ -131,11 +131,13 @@ beyond the `ext:<statusKey>` entry itself.
 
 Each effect can be toggled independently under `animations`:
 
-`engine` is `legacy` by default and keeps the restored renderer byte-compatible. Set it to `compiled-v2` to opt into the precompiled animation catalog and deadline-based scheduler; `/input-settings` switches this safely at runtime. Compiled-v2 compiles complete ANSI frames once per animation, width, theme, label, and state key, applies a distinct compile-time accent text effect to every catalog ID, centers stable geometry, merges adjacent duplicate phases, and uses a one-line fallback below 24 columns. Session metrics are recomputed only when the lifecycle snapshot changes, not on each animation render. To protect input latency, compiled-v2 deliberately disables the legacy editor-border typing, submit, metric, token, and dynamic-workflow pulses; extension-status slots continue their slow correctness refresh. Roll back to `legacy` at any time to restore those effects.
+`engine` is `legacy` by default and keeps the restored renderer byte-compatible. Set it to `compiled-v2` to opt into the precompiled catalog and deadline scheduler, or to `native-v3` to delegate the active working indicator's lifecycle, timer, and frame diffing to Pi's documented `ctx.ui` API. `/input-settings` switches this safely at runtime. Compiled-v2 compiles complete ANSI frames once per animation, width, theme, label, and state key, centers stable geometry, merges adjacent duplicate phases, and uses a one-line fallback below 24 columns. Native-v3 instead supplies Pi intrinsic-width, one-line frames through `setWorkingIndicator({ frames, intervalMs })`; it never registers the above-editor working widget or constructs `CompiledAnimationEngine`. Tool messages are updated only at tool start/end events through `setWorkingMessage()`, never on a timer. Session metrics are recomputed only when the lifecycle snapshot changes in compiled-v2. To protect input latency, non-legacy modes disable the editor's legacy typing, submit, metric, token, and dynamic-workflow pulses. Roll back to `legacy` at any time to restore those effects.
 
 | Key           | Effect                                                                |
 | ------------- | --------------------------------------------------------------------- |
-| `engine`      | `legacy` (default) or opt-in `compiled-v2` animation engine          |
+| `engine`      | `legacy` (default), `compiled-v2`, or opt-in `native-v3` engine       |
+| `mascotPackPath` | Optional absolute JSON file below `~/.pi/pi-input-revamp-packs/` (native-v3) |
+| `reducedMotion` | Use one authored static mascot pose in native-v3 |
 | `typingPulse` | Border and π lerp toward white the faster you type                    |
 | `submitFlash` | Brief white border pulse when you submit (text goes non-empty → empty) |
 | `metricPulse` | Metric text pulses toward white when its value changes                |
@@ -149,10 +151,36 @@ where every option animates live before you choose it. Choices are saved to
 session starts and remembers the last resolved choice so consecutive sessions do
 not repeat it. `off` hides the working animation entirely.
 
-The working animation is an insertion-ordered `aboveEditor` widget rather than an
-editor row. Pi orders these widgets by registration time: to keep the animation
-above active legacy-subagent and dynamic-workflow boxes, list this package before
-`pi-interactive-subagents` in `settings.json` (the portable config does this).
+Legacy and compiled-v2 use the compatibility `aboveEditor` widget, so list this package before `pi-interactive-subagents` when ordering matters. Native-v3 does not register that widget: Pi owns its native working-indicator lifecycle and renders only the pack's intrinsic-width line. `off` calls Pi's native visibility API and supplies no frames.
+
+### Native-v3 mascot packs
+
+Native-v3 consumes a declarative, data-only catalog shared by the working indicator and `/input-settings` previews. A pack has fixed-width complete poses (not slices), a cadence, reduced-motion/static and narrow fallbacks, optional `thinking`/`tool` state variants, and optional source/attribution metadata. Built-ins include a tiny fluid shaded slime whose name and metadata explicitly identify it as fan-art inspired rather than official artwork.
+
+Optional local packs are loaded only from `~/.pi/pi-input-revamp-packs/` (or an absolute `animations.mascotPackPath` inside that directory). The loader parses JSON files no larger than 64 KiB and fails closed; it does not import or execute code, follow traversal outside the directory, or accept ANSI/control sequences. A valid pack looks like:
+
+```json
+{
+  "id": "my-slime",
+  "name": "My fan-art slime",
+  "frames": ["  ▄█●ᴗ●█▄  ", " ▟█▒●ᴗ●▒█▙ "],
+  "intervalMs": 120,
+  "staticFrame": "  ▄█●ᴗ●█▄  ",
+  "reducedMotionFrame": "  ▄█●ᴗ●█▄  ",
+  "narrowFallback": " ●ᴗ● ",
+  "source": { "attribution": "Your name", "license": "CC BY 4.0" },
+  "variants": { "tool": { "frames": ["  ▄█◆█▄  "], "intervalMs": 100 } }
+}
+```
+
+Frames are normalized to one visible line and one fixed intrinsic width (at most 24 columns and 256 UTF-8 bytes). An explicit `narrowFallback` may use fewer columns and is selected by width-aware previews instead of center-cropping the normal pose. Pack text is plain data; the current theme contributes at most one compiler-owned foreground run per native frame. Preview rendering uses those same normalized frames and authored deadlines through one shared render gate. Do not use third-party branding or official names without permission; label fan-art/inspired packs and retain attribution.
+
+### Performance and accessibility budgets
+
+- Native-v3 emits only a changed Pi-owned indicator frame; it has no extension scheduler, viewport padding, animated text effects, or duplicate working widget.
+- Every accepted frame is one line, ≤24 visible columns, ≤256 bytes, and ANSI/control-injection safe. A normal indicator has one bounded interval; `reducedMotion` supplies one static authored frame, so Pi starts no animation interval.
+- `off` disables the native indicator. Legacy and compiled-v2 remain explicit rollback paths.
+- `npm run benchmark` is a renderer microbenchmark only; cached frame reads do **not** measure total Pi TUI throughput. Tests enforce output-volume and frame-byte budgets separately.
 
 ## How it works
 

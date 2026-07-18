@@ -42,6 +42,20 @@ import {
   compileAnimationFrames,
   type CompiledAnimationId,
 } from "./animation-engine.ts";
+import {
+  NATIVE_MASCOT_PACKS,
+  NATIVE_MASCOT_CATALOG,
+  MASCOT_PACK_CATALOG,
+  getNativeMascotPack,
+  loadMascotPackFile,
+  nativeMascotFrameAt,
+  nativeWorkingIndicator,
+  normalizeMascotPack,
+  validateMascotPack,
+  type MascotPackInput,
+  type MascotVariantState,
+  type NormalizedMascotPack,
+} from "./native-mascot-pack.ts";
 export {
   AnimationCompiler,
   AnimationSnapshotCache,
@@ -51,6 +65,18 @@ export {
   compileAnimation,
   compileAnimationFrames,
 } from "./animation-engine.ts";
+export {
+  NATIVE_MASCOT_PACKS,
+  NATIVE_MASCOT_CATALOG,
+  MASCOT_PACK_CATALOG,
+  getNativeMascotPack,
+  loadMascotPackFile,
+  nativeMascotFrameAt,
+  nativeWorkingIndicator,
+  normalizeMascotPack,
+  validateMascotPack,
+};
+export type { MascotPackInput, MascotPack, MascotVariantState, NormalizedMascotPack, NativeMascotPack } from "./native-mascot-pack.ts";
 
 // ── Configuration types ──────────────────────────────────
 
@@ -88,8 +114,12 @@ export interface InputRevampConfig {
   /** Element visibility is deliberately separate from layout order. */
   visibility: Record<string, boolean>;
   animations: {
-    /** Legacy remains the byte-compatible default; compiled-v2 is opt-in. */
-    engine: "legacy" | "compiled-v2";
+    /** Legacy remains the byte-compatible default; newer engines are opt-in. */
+    engine: "legacy" | "compiled-v2" | "native-v3";
+    /** Optional JSON pack below ~/.pi/pi-input-revamp-packs. */
+    mascotPackPath?: string;
+    /** Native-v3 uses one static authored pose when reduced motion is enabled. */
+    reducedMotion: boolean;
     typingPulse: boolean;
     submitFlash: boolean;
     metricPulse: boolean;
@@ -110,6 +140,7 @@ const DEFAULT_CONFIG: InputRevampConfig = {
   visibility: {},
   animations: {
     engine: "legacy",
+    reducedMotion: false,
     typingPulse: true,
     submitFlash: true,
     metricPulse: true,
@@ -131,7 +162,7 @@ function isBoolean(value: unknown): value is boolean {
 }
 
 function isAnimationEngine(value: unknown): value is InputRevampConfig["animations"]["engine"] {
-  return value === "legacy" || value === "compiled-v2";
+  return value === "legacy" || value === "compiled-v2" || value === "native-v3";
 }
 
 /** Merge untrusted on-disk JSON with safe defaults without losing layout order. */
@@ -159,6 +190,8 @@ export function mergeInputRevampConfig(parsed: unknown): InputRevampConfig {
     visibility,
     animations: {
       engine: isAnimationEngine(sourceAnimations.engine) ? sourceAnimations.engine : DEFAULT_CONFIG.animations.engine,
+      ...(typeof sourceAnimations.mascotPackPath === "string" ? { mascotPackPath: sourceAnimations.mascotPackPath } : {}),
+      reducedMotion: isBoolean(sourceAnimations.reducedMotion) ? sourceAnimations.reducedMotion : DEFAULT_CONFIG.animations.reducedMotion,
       typingPulse: isBoolean(sourceAnimations.typingPulse) ? sourceAnimations.typingPulse : DEFAULT_CONFIG.animations.typingPulse,
       submitFlash: isBoolean(sourceAnimations.submitFlash) ? sourceAnimations.submitFlash : DEFAULT_CONFIG.animations.submitFlash,
       metricPulse: isBoolean(sourceAnimations.metricPulse) ? sourceAnimations.metricPulse : DEFAULT_CONFIG.animations.metricPulse,
@@ -322,8 +355,53 @@ const THINKING_EXPRESSIONS = [
   "definitely not overthinking...",
 ];
 
-/** Last tool currently executing (read by the editor). */
+/** Active tools keyed by call id; the editor displays the most recently started. */
 let activeToolName: string | null = null;
+const activeToolCalls = new Map<string, string>();
+
+function isNativeV3(config: InputRevampConfig): boolean {
+  return config.animations.engine === "native-v3";
+}
+
+const nativePackFileCache = new Map<string, NormalizedMascotPack | null>();
+
+function cachedNativePackFile(path: string | undefined): NormalizedMascotPack | undefined {
+  if (!path) return undefined;
+  if (!nativePackFileCache.has(path)) nativePackFileCache.set(path, loadMascotPackFile(path) ?? null);
+  return nativePackFileCache.get(path) ?? undefined;
+}
+
+function nativePackFor(config: InputRevampConfig, animation: WorkingAnimation): NormalizedMascotPack {
+  return cachedNativePackFile(config.animations.mascotPackPath) ?? getNativeMascotPack(animation);
+}
+
+/** Apply only the native Pi working-indicator API; no widget or local timer. */
+export function applyNativeWorkingIndicator(
+  ctx: { ui?: { setWorkingIndicator?: (options?: any) => void; setWorkingVisible?: (visible: boolean) => void; theme?: { getFgAnsi?: (key: any) => string } } },
+  config: InputRevampConfig,
+  runtime: AnimationRuntime,
+  state: MascotVariantState = "thinking",
+): void {
+  if (!isNativeV3(config) || !ctx.ui) return;
+  const active = runtime.selected !== "off";
+  const pack = nativePackFor(config, runtime.resolved);
+  const accent = ctx.ui.theme?.getFgAnsi?.("accent") ?? "";
+  const indicator = active ? nativeWorkingIndicator(pack, accent, state, config.animations.reducedMotion) : { frames: [] };
+  ctx.ui.setWorkingIndicator?.(indicator);
+  ctx.ui.setWorkingVisible?.(active);
+}
+
+function updateNativeWorkingMessage(ctx: any, config: InputRevampConfig, message: string): void {
+  if (!isNativeV3(config) || typeof ctx?.ui?.setWorkingMessage !== "function") return;
+  // Tool names are event data, never pack/code input. Keep the native message
+  // plain and bounded so a hostile tool name cannot inject terminal controls.
+  const safe = message
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+    .slice(0, 160);
+  ctx.ui.setWorkingMessage(safe);
+}
 
 /**
  * Read-only view of the footer data, captured from the (otherwise hidden) footer
@@ -908,9 +986,15 @@ export function buildInputSettingItems(
   return [{
     id: "animation-engine",
     label: "Animation engine",
-    description: "Legacy preserves the original renderer; compiled-v2 precompiles frames and uses one deadline timer.",
+    description: "Legacy preserves the original renderer; compiled-v2 is rollback-safe; native-v3 delegates animation lifecycle to Pi's native working indicator.",
     currentValue: config.animations.engine,
-    values: ["legacy", "compiled-v2"],
+    values: ["legacy", "compiled-v2", "native-v3"],
+  }, {
+    id: "animation-reduced-motion",
+    label: "Reduced animation motion",
+    description: "Use one authored static mascot pose in native-v3.",
+    currentValue: config.animations.reducedMotion ? "on" : "off",
+    values: ["off", "on"],
   }, {
     id: "working-animation",
     label: "Working animation",
@@ -929,6 +1013,10 @@ export function applyInputSettingValue(
   if (id === "animation-engine") {
     if (!isAnimationEngine(newValue)) return false;
     config.animations.engine = newValue;
+    return true;
+  }
+  if (id === "animation-reduced-motion" && (newValue === "on" || newValue === "off")) {
+    config.animations.reducedMotion = newValue === "on";
     return true;
   }
   if (id === "working-animation") {
@@ -1039,7 +1127,7 @@ export function renderWorkingWidgetLines(
 class WorkingAnimationWidget {
   private timer: ReturnType<typeof setInterval> | undefined;
   private compiled: CompiledAnimationEngine | undefined;
-  private compiledMode: "legacy" | "compiled-v2";
+  private compiledMode: "legacy" | "compiled-v2" | "native-v3";
   private compiledToolName: string | null | undefined;
   private compiledExpression = "";
   private compiledStateKey = "";
@@ -1152,6 +1240,7 @@ class WorkingAnimationWidget {
     }
     const idle = this.ctx.isIdle();
     if (this.compiledMode === "compiled-v2") return this.renderCompiled(width, idle);
+    if (this.compiledMode === "native-v3") return [];
     if (!idle && this.runtime.selected !== "off") this.start();
     else this.stop();
     return renderWorkingWidgetLines(this.runtime, idle, activeToolName, width, this.theme.getFgAnsi("accent"));
@@ -1174,7 +1263,11 @@ export class AnimationPreviewMenu {
   private selectedIndex: number;
   private readonly startedAt = Date.now();
   private timer: ReturnType<typeof setInterval> | undefined;
-  private readonly engineMode: "legacy" | "compiled-v2";
+  private nativePreviewTimer: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
+  private readonly engineMode: "legacy" | "compiled-v2" | "native-v3";
+  private readonly customMascotPack?: NormalizedMascotPack;
+  private readonly reducedMotion: boolean;
   private compiledPreviewScheduler: CompiledAnimationScheduler | undefined;
   private readonly tui: TUI;
   private readonly theme: {
@@ -1195,13 +1288,17 @@ export class AnimationPreviewMenu {
     keybindings: KeybindingsManager,
     currentValue: string,
     done: (selectedValue?: string) => void,
-    engineMode: "legacy" | "compiled-v2" = "legacy",
+    engineMode: "legacy" | "compiled-v2" | "native-v3" = "legacy",
+    mascotPackPath?: string,
+    reducedMotion = false,
   ) {
     this.tui = tui;
     this.theme = theme;
     this.keybindings = keybindings;
     this.done = done;
     this.engineMode = engineMode;
+    this.customMascotPack = cachedNativePackFile(mascotPackPath);
+    this.reducedMotion = reducedMotion;
     if (engineMode === "compiled-v2") {
       this.compiledPreviewScheduler = new CompiledAnimationScheduler({
         requestRender: () => { try { this.tui.requestRender(); } catch { /* detached */ } },
@@ -1217,7 +1314,31 @@ export class AnimationPreviewMenu {
         try { this.tui.requestRender(); } catch { /* submenu may be detached */ }
       }, 80);
       this.timer.unref?.();
+    } else if (engineMode === "native-v3" && !reducedMotion) {
+      this.scheduleNativePreview();
     }
+  }
+
+  private scheduleNativePreview(): void {
+    if (this.disposed || this.engineMode !== "native-v3" || this.reducedMotion) return;
+    const packs = this.customMascotPack ? [this.customMascotPack] : WORKING_ANIMATIONS.map(getNativeMascotPack);
+    const effectiveThinkingVariants = packs.map((pack) => pack.variants.thinking ?? pack);
+    const intervals = [...new Set(effectiveThinkingVariants
+      .filter((variant) => variant.frames.length > 1)
+      .map((variant) => variant.intervalMs))];
+    // The random row changes built-in mascot every 800 ms. A custom pack
+    // overrides every row, so it has no separate random transition.
+    if (!this.customMascotPack) intervals.push(800);
+    if (intervals.length === 0) return;
+    const elapsed = Math.max(0, Date.now() - this.startedAt);
+    const delay = Math.max(1, Math.min(...intervals.map((interval) => interval - (elapsed % interval))));
+    this.nativePreviewTimer = setTimeout(() => {
+      this.nativePreviewTimer = undefined;
+      if (this.disposed) return;
+      try { this.tui.requestRender(); } catch { /* submenu may be detached */ }
+      this.scheduleNativePreview();
+    }, delay);
+    this.nativePreviewTimer.unref?.();
   }
 
   private preview(option: WorkingAnimationChoice, elapsed: number, width: number): string {
@@ -1225,6 +1346,12 @@ export class AnimationPreviewMenu {
     const resolved = option === "random"
       ? WORKING_ANIMATIONS[Math.floor(elapsed / 800) % WORKING_ANIMATIONS.length]
       : option;
+    if (this.engineMode === "native-v3") {
+      const pack = this.customMascotPack ?? getNativeMascotPack(resolved);
+      const indicator = nativeWorkingIndicator(pack, this.theme.getFgAnsi("accent"), "thinking", this.reducedMotion, width);
+      const frame = Math.floor(Math.max(0, elapsed) / indicator.intervalMs) % Math.max(1, indicator.frames.length);
+      return indicator.frames[frame] ?? pack.staticFrame;
+    }
     if (this.engineMode === "compiled-v2") {
       const animation = (COMPILED_ANIMATION_IDS as readonly string[]).includes(resolved)
         ? resolved as CompiledAnimationId : "wave";
@@ -1305,8 +1432,11 @@ export class AnimationPreviewMenu {
 
   invalidate(): void {}
   dispose(): void {
+    this.disposed = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    if (this.nativePreviewTimer) clearTimeout(this.nativePreviewTimer);
+    this.nativePreviewTimer = undefined;
     this.compiledPreviewScheduler?.dispose();
     this.compiledPreviewScheduler = undefined;
   }
@@ -1343,6 +1473,8 @@ export function createInputSettingsComponent(
           closeSubmenu(selectedValue);
         },
         config.animations.engine,
+        config.animations.mascotPackPath,
+        config.animations.reducedMotion,
       );
       activePreview = preview;
       return preview;
@@ -1520,7 +1652,7 @@ export class NerismaInputEditor extends CustomEditor {
   }
 
   private _startInputAnimation() {
-    if (this.config.animations.engine === "compiled-v2" || this._inputTimer) return;
+    if (this.config.animations.engine !== "legacy" || this._inputTimer) return;
     this._inputTimer = setInterval(() => {
       try { this.tui.requestRender(); } catch {}
     }, 50);
@@ -1534,7 +1666,7 @@ export class NerismaInputEditor extends CustomEditor {
   }
 
   private _startDynamicWorkflowAnimation() {
-    if (this.config.animations.engine === "compiled-v2" || this._dynamicWorkflowTimer) return;
+    if (this.config.animations.engine !== "legacy" || this._dynamicWorkflowTimer) return;
     this._dynamicWorkflowStartedAt = Date.now();
     this._dynamicWorkflowTimer = setInterval(() => {
       try { this.tui.requestRender(); } catch { /* editor may be detached */ }
@@ -1788,9 +1920,9 @@ export class NerismaInputEditor extends CustomEditor {
 
     // ── Typing speed → bar whitening (INDEPENDENT of thinking) ──
     const configAnim = this.config.animations;
-    if (configAnim.engine === "compiled-v2") {
-      // v2 owns one deadline scheduler in the working widget; legacy editor
-      // intervals and their residual pulse state are cleared on mode switch.
+    if (configAnim.engine !== "legacy") {
+      // Non-legacy engines own working animation lifecycle outside the editor;
+      // clear legacy editor intervals and residual pulse state on mode switch.
       this._disableLegacyAnimationState();
     }
     const currentText = this.getText();
@@ -1890,7 +2022,7 @@ export class NerismaInputEditor extends CustomEditor {
     };
 
     try {
-      if (this.config.animations.engine === "compiled-v2") {
+      if (this.config.animations.engine !== "legacy") {
         const cached = compiledSessionStats();
         entries = cached.entries;
         metrics = cached.metrics;
@@ -1939,14 +2071,14 @@ export class NerismaInputEditor extends CustomEditor {
           }, 16);
         }
       }
-    } else if (configAnim.engine === "compiled-v2" || !configAnim.metricPulse) {
+    } else if (configAnim.engine !== "legacy" || !configAnim.metricPulse) {
       this._metricPulse = 0;
       this._pulsingElements.clear();
     }
 
     // ── Last turn tracking ──────────────────────────────
     if (hasAssistantResponse && lastTurn && sessionInfo) {
-      if (this.config.animations.engine !== "compiled-v2") {
+      if (this.config.animations.engine === "legacy") {
         const luts = sessionInfo.lastPromptTs;
         if (luts) {
           for (let i = entries.length - 1; i >= 0; i--) {
@@ -1990,7 +2122,7 @@ export class NerismaInputEditor extends CustomEditor {
           }, 16);
         }
       }
-    } else if (configAnim.engine === "compiled-v2" || !configAnim.tokPulse) {
+    } else if (configAnim.engine !== "legacy" || !configAnim.tokPulse) {
       this._tokPulse = 0;
     }
 
@@ -2127,6 +2259,7 @@ export class NerismaInputEditor extends CustomEditor {
 
 export default function (pi: ExtensionAPI): void {
   let registered = false;
+  let compatibilityWidgetRegistered = false;
   const config = loadConfig();
   const animationRuntime: AnimationRuntime = {
     selected: config.animations.working,
@@ -2134,6 +2267,22 @@ export default function (pi: ExtensionAPI): void {
     startedAt: 0,
     expressionIndex: -1,
     expressionChangedAt: 0,
+  };
+
+  const registerCompatibilityWidget = (sessionCtx: any): void => {
+    if (compatibilityWidgetRegistered) return;
+    // Legacy and compiled-v2 retain the compatibility widget as rollback paths.
+    sessionCtx.ui.setWidget(
+      "input-revamp-working",
+      (tui: TUI, theme: { getFgAnsi: (key: any) => string }) => new WorkingAnimationWidget(
+        tui,
+        animationRuntime,
+        { isIdle: sessionCtx.isIdle, config },
+        theme,
+      ),
+      { placement: "aboveEditor" },
+    );
+    compatibilityWidgetRegistered = true;
   };
 
   pi.registerCommand("input-settings", {
@@ -2151,8 +2300,22 @@ export default function (pi: ExtensionAPI): void {
         config,
         animationRuntime,
         () => {
-          if (config.animations.engine === "compiled-v2" && latestSessionContext?.sessionManager) {
+          if (config.animations.engine !== "legacy" && latestSessionContext?.sessionManager) {
             animationSnapshotCache.hydrate(latestSessionContext.sessionManager);
+          }
+          if (latestSessionContext) {
+            if (isNativeV3(config)) {
+              applyNativeWorkingIndicator(latestSessionContext, config, animationRuntime, activeToolName ? "tool" : "thinking");
+              if (compatibilityWidgetRegistered) {
+                latestSessionContext.ui.setWidget?.("input-revamp-working", undefined);
+                compatibilityWidgetRegistered = false;
+              }
+            } else {
+              latestSessionContext.ui.setWorkingVisible?.(false);
+              latestSessionContext.ui.setWorkingIndicator?.();
+              latestSessionContext.ui.setWorkingMessage?.();
+              if (!compatibilityWidgetRegistered) registerCompatibilityWidget(latestSessionContext);
+            }
           }
           if (!saveConfig(config)) ctx.ui.notify("Could not save input/footer settings", "error");
         },
@@ -2169,7 +2332,9 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("session_start", (_event, ctx) => {
     latestSessionContext = ctx as Record<string, any>;
-    if (config.animations.engine === "compiled-v2") {
+    activeToolCalls.clear();
+    activeToolName = null;
+    if (config.animations.engine !== "legacy") {
       animationSnapshotCache.hydrate(ctx.sessionManager);
     }
     // Resolve random once per session, never per render or per working turn.
@@ -2185,16 +2350,17 @@ export default function (pi: ExtensionAPI): void {
     if (registered) return;
     registered = true;
 
-    ctx.ui.setWorkingVisible(false);
-
-    // Pi preserves insertion order for aboveEditor widgets. Keep this package
-    // before pi-interactive-subagents in settings.json so this session-start
-    // registration remains above its later subagent/workflow status widgets.
-    ctx.ui.setWidget(
-      "input-revamp-working",
-      (tui, theme) => new WorkingAnimationWidget(tui, animationRuntime, { isIdle: ctx.isIdle, config }, theme),
-      { placement: "aboveEditor" },
-    );
+    if (isNativeV3(config)) {
+      // Native-v3 intentionally registers no above-editor widget and creates no
+      // local scheduler. Pi owns visibility, cadence, diffing, and disposal.
+      ctx.ui.setWorkingMessage?.("Working…");
+      applyNativeWorkingIndicator(ctx, config, animationRuntime);
+    } else {
+      ctx.ui.setWorkingVisible(false);
+      ctx.ui.setWorkingIndicator?.();
+      ctx.ui.setWorkingMessage?.();
+      registerCompatibilityWidget(ctx);
+    }
 
     // Footer fully hidden — but we capture its data provider, the only channel
     // exposing extension statuses (setStatus) to extension code. The `ext:<key>`
@@ -2215,17 +2381,31 @@ export default function (pi: ExtensionAPI): void {
   // Final agent completion is the correctness boundary for session metrics. Refresh
   // once here rather than from every compiled animation render.
   pi.on("agent_end", () => {
-    if (config.animations.engine === "compiled-v2" && latestSessionContext?.sessionManager) {
+    if (config.animations.engine !== "legacy" && latestSessionContext?.sessionManager) {
       animationSnapshotCache.refresh(latestSessionContext.sessionManager);
     }
   });
 
-  // Track the running tool for the animated expressions.
-  pi.on("tool_execution_start", (event) => {
-    activeToolName = event.toolName;
+  // Track tools for legacy/compiled expressions and update native-v3 only at
+  // lifecycle events (never from a timer).
+  pi.on("tool_execution_start", (event, ctx) => {
+    const callId = typeof event.toolCallId === "string" ? event.toolCallId : `anonymous:${activeToolCalls.size}`;
+    activeToolName = typeof event.toolName === "string" ? event.toolName : "tool";
+    activeToolCalls.set(callId, activeToolName);
+    updateNativeWorkingMessage(ctx, config, `Using ${activeToolName}…`);
+    applyNativeWorkingIndicator(ctx, config, animationRuntime, "tool");
   });
 
-  pi.on("tool_execution_end", () => {
-    activeToolName = null;
+  pi.on("tool_execution_end", (event, ctx) => {
+    if (typeof event.toolCallId === "string") activeToolCalls.delete(event.toolCallId);
+    else activeToolCalls.clear();
+    activeToolName = [...activeToolCalls.values()].at(-1) ?? null;
+    if (activeToolName) {
+      updateNativeWorkingMessage(ctx, config, `Using ${activeToolName}…`);
+      applyNativeWorkingIndicator(ctx, config, animationRuntime, "tool");
+    } else {
+      updateNativeWorkingMessage(ctx, config, "Working…");
+      applyNativeWorkingIndicator(ctx, config, animationRuntime, "thinking");
+    }
   });
 }
